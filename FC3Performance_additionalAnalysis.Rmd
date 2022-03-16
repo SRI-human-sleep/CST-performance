@@ -1,0 +1,96 @@
+---
+title: "Performance of Fitbit Charge 3 against polysomnography in measuring sleep in adolescent boys and girls"
+subtitle: "ADDITIONAL ANALYSIS"
+author: "Luca Menghini, MS, Dilara Yüksel, PhD, Aimee Goldstone, PhD, Fiona C Baker PhD, Massimiliano de Zambotti, PhD"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float: true
+    css: styles.css
+  pdf_document: default
+  word_document: default
+  theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r echo=FALSE}
+rm(list=ls())
+```
+
+<br>
+
+# Aims and content
+
+The present document includes additional analyses performed to evaluate the performance of the Fitbit Charge 3 (FC3) in a sample of adolecents. Specifically, here we compute the **Cohen's kappa** and the **PABAK** coefficients for wake/sleep classification and for each sleep stage ("light", "deep" and REM sleep).
+
+<br>
+
+# Dataset
+
+Here, we load the dataset generated with the script available from https://sri-human-sleep.github.io/CST-performance/FC3performance-dataAnalysisReport.html (*ebe* dataset, as recoded in section 4.1 of that report). The "Fitbit" and "PSG" columns include the epoch-by-epoch (EBE) scores from FC3 and polysomnography, respectively. 
+Both are coded as:
+
+- 10 = wake
+
+- 2 = N1/N2 or 'light' sleep
+
+- 3 = 'deep' sleep
+
+- 5 = REM sleepì
+```{r }
+(ebe <- read.csv("ebeRec.csv")[,c("subject","group","time","Fitbit","PSG")])[1:3,] # reading and showing first 3 rows
+```
+
+<br>
+
+# Cohen's kappa  {.tabset .tabset-fade .tabset-pills}
+
+Here, we use the *groupEBE* function from Menghini et al (2020) for computing the Cohen's kappa and the PABAK coefficients in the sample of healthy sleepers (N = 27) and on the insomnia group (N = 12), respectively. The function requires the *epiR* package.
+```{r }
+source("functions/groupEBE.R")
+```
+
+## HEALTHY SLEEPERS`
+
+Classic 95% confidence intervals (CI) are computed around kappa and PABAK values in the subsample of healthy sleepers.
+```{r warning=FALSE,message=FALSE}
+rbind(groupEBE(data=ebe[ebe$group=="CTRL",],RefCol="PSG",deviceCol="Fitbit",
+               stage=10,stageLabel="wake",metricsType="avg",CI.type="classic",advancedMetrics=TRUE)[,c("stage","kappa","pabak")],
+      groupEBE(data=ebe[ebe$group=="CTRL",],RefCol="PSG",deviceCol="Fitbit",
+               stage=2,stageLabel="light",metricsType="avg",CI.type="classic",advancedMetrics=TRUE)[,c("stage","kappa","pabak")],
+      groupEBE(data=ebe[ebe$group=="CTRL",],RefCol="PSG",deviceCol="Fitbit",
+               stage=2,stageLabel="deep",metricsType="avg",CI.type="classic",advancedMetrics=TRUE)[,c("stage","kappa","pabak")],
+      groupEBE(data=ebe[ebe$group=="CTRL",],RefCol="PSG",deviceCol="Fitbit",
+               stage=3,stageLabel="REM",metricsType="avg",CI.type="classic",advancedMetrics=TRUE)[,c("stage","kappa","pabak")])
+```
+
+<br>
+
+## INSOMNIA
+
+95% confidence intervals (CI) are computed using the bootstrap percentile method in the insomnia subsample.
+```{r warning=FALSE,message=FALSE}
+rbind(groupEBE(data=ebe[ebe$group!="CTRL",],RefCol="PSG",deviceCol="Fitbit",
+               stage=10,stageLabel="wake",metricsType="avg",CI.type="boot",advancedMetrics=TRUE)[,c("stage","kappa","pabak")],
+      groupEBE(data=ebe[ebe$group!="CTRL",],RefCol="PSG",deviceCol="Fitbit",
+               stage=2,stageLabel="light",metricsType="avg",CI.type="boot",advancedMetrics=TRUE)[,c("stage","kappa","pabak")],
+      groupEBE(data=ebe[ebe$group!="CTRL",],RefCol="PSG",deviceCol="Fitbit",
+               stage=2,stageLabel="deep",metricsType="avg",CI.type="boot",advancedMetrics=TRUE)[,c("stage","kappa","pabak")],
+      groupEBE(data=ebe[ebe$group!="CTRL",],RefCol="PSG",deviceCol="Fitbit",
+               stage=3,stageLabel="REM",metricsType="avg",CI.type="boot",advancedMetrics=TRUE)[,c("stage","kappa","pabak")])
+````
+
+<br>
+
+# References
+
+Byrt T, et al. Bias, prevalence and kappa. J Clin Epidemiol. 1993;46(5):423–429. https://doi.org/10.1016/0895-4356(93)90018-V
+
+Cohen J. A Coefficient of agreement for nominal scales. Educ Psychol Meas. 1960;20(1):37–46. https://doi.org/10.1177/001316446002000104
+
+Menghini, L., Cellini, N., Goldstone, A., Baker, F. C., & de Zambotti, M. A standardized framework for testing the performance of sleep-tracking technology: Step-by-step guidelines and open-source code. *Sleep* (In press) https://doi.org/10.1093/sleep/zsaa170   
+Step-by-step pipeline pubicly available from https://sri-human-sleep.github.io/sleep-trackers-performance/AnalyticalPipeline_v1.0.0.html

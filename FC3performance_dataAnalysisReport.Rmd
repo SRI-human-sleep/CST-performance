@@ -1,0 +1,3401 @@
+---
+title: "Performance of Fitbit Charge 3 against polysomnography in measuring sleep in adolescent boys and girls"
+subtitle: "Supplemental material S1: data analysis report"
+author: "Luca Menghini, MS, Dilara Yüksel, PhD, Aimee Goldstone, PhD, Fiona C Baker PhD, Massimiliano de Zambotti, PhD"
+date: "Center for Health Sciences, SRI International, Menlo Park, CA, USA; Department of General Psychology, University of Padova, Italy"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float: true
+    css: styles.css
+  pdf_document: default
+  word_document: default
+  theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r echo=FALSE}
+rm(list=ls())
+```
+
+<br>
+
+# Aims and content
+
+The present document includes the analyses performed to evaluate and predict the performance of the Fitbit Charge 3 in a sample of adolecents.<br>The document is structured as follow:
+
+**1. Datasets**: the datasets with epoch-by-epoch (EBE) and demographic data are read and recoded to be analyzed.
+
+**2. Discrepancy analysis**: discrepancies between Fitbit and PSG sleep measures (TST, SE, WASO, etc.) are analyzed, and Bland-Altman plots are generated.
+
+**3. Epoch-by-epoch (EBE) analysis**: the Fitbit accuracy in sleep stages classification compared to PSG is evaluated on an epoch-by-epoch basis.
+
+**4. Predictors of accuracy**: potential predictors of measurement accuracy (demographic variables, firmware version and time of data collection, and cardiac reactiviy to sleep stage shifting) are explored using linear regression. 
+
+Discrepancy and EBE analyses are based on recently published guidelines (Menghini et al., 2020, https://doi.org/10.1093/sleep/zsaa170) and analytical pipeline (https://sri-human-sleep.github.io/sleep-trackers-performance/AnalyticalPipeline_v1.0.0.html).
+
+<br>
+
+# 1. Datasets
+
+As a first step, we read and recode the datafiles. 
+
+- *ebe* is the main dataset including epoch-by-epoch data that will be used to generate the main ouputs
+
+- *demos* is the dataset of demographic variables, some of which will be used as predictors of the performance metrics
+
+```{r }
+# epoch by epoch data
+ebe <- read.csv("ebe.csv",stringsAsFactors = F)[,c(1,3,6:7,9)] # subsetting
+colnames(ebe) <- c("subject","time","Fitbit","PSG","Fitbit_HR")
+ebe$subject <- as.factor(substr(ebe$subject,4,7)) # simplifying subject's IDs
+head(ebe, 3) # showing first 3 rows
+
+# demographic data
+demos <- read.csv("Demographics.csv",sep=";",stringsAsFactors = F)[,c(1:6,8:10,13)] # subsetting
+colnames(demos) <- c("subject","date","age","group","sex","scoreConc","PSG.start","Fitbit.start","firmware","BMI")
+demos$subject <- as.factor(substr(demos$subject,4,7)) # simplifying subject's IDs
+demos[demos$group!="CTRL","group"] <- "INS" # grouping factor
+demos[,c("group","sex","firmware")] <- lapply(demos[,c("group","sex","firmware")],as.factor)
+summary(demos[,c(2:6,9:10)]) # summary of demographic variables
+demos[,7:8] # temporal synchronization between PSG and Fitbit
+```
+
+<br>
+
+## 1.1. Epochs recoding
+
+Fitbit-derived epoch-by-epoch (EBE) data are recoded to be matched with the coding system used for PSG:
+
+- 10 = wake
+
+- 2 = N1/N2 or 'light' sleep
+
+- 3 = 'deep' sleep
+
+- 5 = REM sleep
+
+```{r warning=FALSE}
+library(mgsub)
+ebe$Fitbit <- as.integer(mgsub(ebe$Fitbit,pattern=c("wake","light","deep","rem"),replacement=c(10,2,3,5)))
+```
+
+<br>
+
+PSG-derived epoch-by-epoch (EBE) data are also recoded to have both 1 (N1) and 2 (N2) epochs encoded as 2 ('light' sleep).
+
+Moreover, some misspecified epochs are corrected:
+
+- 2 *wake* epochs of participant A016 were coded as 138. These are recoded as 10.
+
+- 16 epochs of participant A018 were coded as 0. These are recoded as R R R R R R R N1 N2 N2 N2 N2 N1 N2 N2 N2.
+
+- 10 epochs of participant A007 were coded as 0. These are recoded as N3
+
+```{r }
+# recoding 138 as 10 (wake)
+ebe[ebe$PSG==138,"PSG"] <- 10
+# recoding A016 and A007 epochs 
+ebe[ebe$subject=="A018" & ebe$PSG==0,"PSG"] <- c(5, 5, 5, 5, 5, 5, 5, 1, 2, 2, 2, 2, 1, 2, 2, 2)
+ebe[ebe$subject=="A007" & ebe$PSG==0,"PSG"] <- rep(3,10)
+
+# recoding PSG epochs from 1 (N1) to 2 ('light' sleep)
+ebe[ebe$PSG==1,"PSG"] <- 2
+c(levels(as.factor(ebe$PSG)),levels(as.factor(ebe$Fitbit))) # sanity check
+```
+
+<br>
+
+# 3. Discrepancy analysis
+
+The first analytical step is the analysis of the discrepancies in the sleep measures derived from Fitbit and PSG EBE data. Thus, we start by using the *EBE2sleep* function to generate the dataset of sleep measures for both Fitbit and PSG data. The **demos** dataset is used to split the sample between the group of healthy sleepers (N = 27) and the insomnia group (N = 12).
+
+```{r }
+source("functions/EBE2sleep.R")
+sleep.measures <- ebe2sleep(data=ebe, idCol="subject", RefCol="PSG", deviceCol="Fitbit", epochLenght=30,
+                            staging=TRUE, stages=c(wake=10, light=2, deep=3, REM=5))
+
+# adding group column to sleep.measures dataset
+sleep.measures <- plyr::join(demos[,c("subject","group")],sleep.measures,by="subject",type="full")
+head(sleep.measures[,1:17],3) # showing first 3 rows
+```
+
+<br>
+
+## 3.1. Individual-level discrepancies  {.tabset .tabset-fade .tabset-pills}
+
+Here, we compute the differences between device- and reference -derived sleep measures for each subject, using the the *indDiscr.R* function. The function is applied on the group of healthy sleepers (N = 27), and on the insomnia group (N = 12), respectively.
+
+```{r }
+source("functions/indDiscr.R")
+```
+
+### HEALTHY SLEEPERS
+
+```{r out.width='80%',message=FALSE,warning=FALSE}
+p <- indDiscr(data = sleep.measures[sleep.measures$group=="CTRL",],staging=TRUE,digits=2,doPlot=TRUE)[[2]]
+p + theme(text = element_text(size=8))
+```
+
+<br>
+
+*Comments:*
+
+- we can observe **2 outliers** with extreme bias in TST, SE, and WASO: **A007** (PSG TST = 308.5min, SE = 62.96%, WASO = 170.5min), and **A034** (PSG TST = 303.0min, SE = 69.1%, WASO = 122.5.5min). Both outliers are characterized by a very long PSG-derived WASO compared to other participants, leading to shorter TST and lower SE (all three measures are higher or lower than the mean of the sample + 2SD)
+
+<details><summary>Show outliers details</summary>
+<p>
+```{r out.width='80%'}
+# dataset
+discrep <- indDiscr(data = sleep.measures, staging=TRUE)[[1]][,1:8]
+discrep <- plyr::join(discrep,demos[,c("subject","group","sex","age","BMI","firmware","date")],by="subject")
+discrep <- plyr::join(discrep,sleep.measures[,c(1,4,6,8,10,12,14,16)],by="subject")
+discrep[discrep$subject=="A007"|discrep$subject=="A034","outliers"] <- 1 # marking outliers for TST, SE & WASO
+discrep[discrep$subject!="A007"&discrep$subject!="A034","outliers"] <- 0
+discrep$sex <- as.factor(discrep$sex)
+
+# plotting outliers - TST
+par(mfrow=c(2,1))
+hist(sleep.measures[sleep.measures$group=="CTRL","TST_ref"],xlim=c(200,600),breaks=5,col="darkgray",
+     main="PSG TST outliers (M = sample mean, SD = standard deviation)",xlab="TST (min)")
+abline(v=mean(sleep.measures[sleep.measures$group=="CTRL","TST_ref"]) - 
+         3*sd(sleep.measures[sleep.measures$group=="CTRL","TST_ref"]),col="red")
+text(x=230,y=10,labels="M-3SD",col="red")
+abline(v=mean(sleep.measures[sleep.measures$group=="CTRL","TST_ref"]) - 
+         2*sd(sleep.measures[sleep.measures$group=="CTRL","TST_ref"]),col="orange")
+text(x=290,y=8,labels="M-2SD",col="orange")
+abline(v=sleep.measures[sleep.measures$subject=="A007","TST_ref"],lwd=1.5,lty=2)
+text(x=310,y=6,labels="A007")
+abline(v=sleep.measures[sleep.measures$subject=="A034","TST_ref"],lwd=1.5,lty=2)
+text(x=300,y=5,labels="A034")
+hist(discrep[discrep$group=="CTRL","TST_diff"],breaks=10,col="darkgray",xlim=c(-60,150),
+     main="TST diff outliers",xlab="FC3 - PSG diff. in TST (min)")
+abline(v=mean(discrep[discrep$group=="CTRL","TST_diff"]) + 
+         3*sd(discrep[discrep$group=="CTRL","TST_diff"]),
+       col="red")
+text(x=85,y=10,labels="M+3SD",col="red")
+abline(v=mean(discrep[discrep$group=="CTRL","TST_diff"]) + 
+         2*sd(discrep[discrep$group=="CTRL","TST_diff"]),
+       col="orange")
+text(x=55,y=9,labels="M+2SD",col="orange")
+abline(v=discrep[discrep$subject=="A034","TST_diff"],lwd=1.5,lty=2)
+text(x=65,y=5,labels="A034")
+abline(v=discrep[discrep$subject=="A007","TST_diff"],lwd=1.5,lty=2)
+text(x=100,y=5,labels="A007")
+
+# plotting outliers - SE
+par(mfrow=c(2,1))
+hist(sleep.measures[sleep.measures$group=="CTRL","SE_ref"],xlim=c(50,100),breaks=10,col="darkgray",
+     main="PSG SE outliers (M = sample mean, SD = standard deviation)",xlab="SE (%)")
+abline(v=mean(sleep.measures[sleep.measures$group=="CTRL","SE_ref"]) - 
+         3*sd(sleep.measures[sleep.measures$group=="CTRL","SE_ref"]),col="red")
+text(x=66,y=8,labels="M-3SD",col="red")
+abline(v=mean(sleep.measures[sleep.measures$group=="CTRL","SE_ref"]) - 
+         2*sd(sleep.measures[sleep.measures$group=="CTRL","SE_ref"]),col="orange")
+text(x=75,y=8,labels="M-2SD",col="orange")
+abline(v=sleep.measures[sleep.measures$subject=="A007","SE_ref"],lwd=1.5,lty=2)
+text(x=63,y=6,labels="A007")
+abline(v=sleep.measures[sleep.measures$subject=="A034","SE_ref"],lwd=1.5,lty=2)
+text(x=70,y=6,labels="A034")
+hist(discrep[discrep$group=="CTRL","SE_diff"],breaks=10,col="darkgray",
+     main="SE diff outliers",xlab="FC3 - PSG diff. in SE (%)")
+abline(v=mean(discrep[discrep$group=="CTRL","SE_diff"]) + 
+         3*sd(discrep[discrep$group=="CTRL","SE_diff"]),col="red")
+text(x=18,y=10,labels="M+3SD",col="red")
+abline(v=mean(discrep[discrep$group=="CTRL","SE_diff"]) + 
+         2*sd(discrep[discrep$group=="CTRL","SE_diff"]),
+       col="orange")
+text(x=12,y=10,labels="M+2SD",col="orange")
+abline(v=discrep[discrep$subject=="A034","SE_diff"],lwd=1.5,lty=2)
+text(x=15,y=5,labels="A034")
+abline(v=discrep[discrep$subject=="A007","SE_diff"],lwd=1.5,lty=2)
+text(x=21,y=5,labels="A007")
+
+# plotting outliers - WASO
+par(mfrow=c(2,1))
+hist(sleep.measures[sleep.measures$group=="CTRL","WASO_ref"],xlim=c(0,200),breaks=7,col="darkgray",
+     main="PSG WASO outliers (M = sample mean, SD = standard deviation)",xlab="SE (%)")
+abline(v=mean(sleep.measures[sleep.measures$group=="CTRL","WASO_ref"]) + 
+           3*sd(sleep.measures[sleep.measures$group=="CTRL","WASO_ref"]),col="red")
+text(x=145,y=9,labels="M+3SD",col="red")
+abline(v=mean(sleep.measures[sleep.measures$group=="CTRL","WASO_ref"]) + 
+           2*sd(sleep.measures[sleep.measures$group=="CTRL","WASO_ref"]),col="orange")
+text(x=110,y=9,labels="M+2SD",col="orange")
+abline(v=sleep.measures[sleep.measures$subject=="A007","WASO_ref"],lwd=1.5,lty=2)
+text(x=170,y=6,labels="A007")
+abline(v=sleep.measures[sleep.measures$subject=="A034","WASO_ref"],lwd=1.5,lty=2)
+text(x=120,y=6,labels="A034")
+hist(discrep[discrep$group=="CTRL","WASO_diff"],breaks=10,col="darkgray",
+     main="WASO diff outliers",
+     xlab="FC3 - PSG diff. in WASO (%)")
+abline(v=mean(discrep[discrep$group=="CTRL","WASO_diff"]) - 
+           3*sd(discrep[discrep$group=="CTRL","WASO_diff"]),col="red")
+text(x=-80,y=6,labels="M-3SD",col="red")
+abline(v=mean(discrep[discrep$group=="CTRL","WASO_diff"]) - 
+           2*sd(discrep[discrep$group=="CTRL","WASO_diff"]),
+       col="orange")
+text(x=-55,y=6,labels="M-2SD",col="orange")
+abline(v=discrep[discrep$subject=="A034","WASO_diff"],lwd=1.5,lty=2)
+text(x=-65,y=4,labels="A034")
+abline(v=discrep[discrep$subject=="A007","WASO_diff"],lwd=1.5,lty=2)
+text(x=-95,y=4,labels="A007")
+```
+</p>
+</details>
+
+The following analyses will be **replicated with and without such subjects**
+
+<br>
+
+### INSOMNIA
+
+```{r out.width='80%',message=FALSE,warning=FALSE}
+p <- indDiscr(data=sleep.measures[sleep.measures$group!="CTRL",],staging=TRUE,digits=2,doPlot=TRUE)[[2]]
+p + theme(text = element_text(size=8))
+```
+
+<br>
+
+*Comments:*
+
+- none of the subjects in the insomnia group show extreme patterns of bias compared to the others, with the exception of **A042** (WASO = 22.5min, SOL = 86min), which shows relatively high biases in WASO, SOL, Deep and REM sleep duration.
+
+<br>
+
+## 3.2. Group-level discrepancies  {.tabset .tabset-fade .tabset-pills}
+
+Here, we use the *groupDisc* function to quantify the discrepancies between Fitbit- and PSG-derived sleep measures at the group level. This is done both separately for the healthy sleepers and the insomnia group separately, and by joining the two groups. Discrepancies are analyzed based on the visual inspection of the data (see Bland-Altman plots below).
+
+```{r }
+source("functions/groupDiscr.R")
+```
+
+### HEALTHY SLEEPERS
+
+For healthy sleepers, discrepancies in TST, SE and WASO are computed by excluding the 2 outliers highlighted in the previous section: A007 and A034. Moreover, two outliers are excluded from the analysis of SOL discrepancy (see Bland-ALtman plots for details).
+
+```{r message=FALSE,warning=FALSE}
+out <- groupDiscr(data=sleep.measures[sleep.measures$group=="CTRL" &
+                                        sleep.measures$subject!="A007" & sleep.measures$subject!="A034",],
+                  measures=c("TST_device","TST_ref"),warnings=FALSE)[,c(1:3,10:15),]
+for(measure in c("SE","SOL","WASO","Light","Deep","REM")){
+  data <- sleep.measures[sleep.measures$group=="CTRL",]
+  if(measure=="SE"|measure=="WASO"|measure=="SOL"){ data <- data[data$subject!="A007" & data$subject!="A034",]}
+  out <- rbind(out,groupDiscr(data=data,measures=gsub("TST",measure,c("TST_device","TST_ref")),
+                              warnings=FALSE)[,c(1:3,10:15),])}
+write.csv(out,"gDiscr_healthySleepers.csv",row.names=FALSE) # saving output for the draft
+knitr::kable(out,caption="Group-level discrepancies in healthy sleepers")
+```
+
+<br>
+
+### INSOMNIA
+
+For insomnia group, discrepancies in SOL are computed by excluding the outlier highlighted in the previous section: A042. Since the sample is very small and differences are often skewed, boostrap CI with percentile method are computed. Classic CI are computed only for REM sleep duration, since boostrap CI might lead to a false positive detection of heteroscedasticity (see Bland-Altman plots). 
+
+```{r message=FALSE,warning=FALSE}
+out <- groupDiscr(data=sleep.measures[sleep.measures$group!="CTRL",],
+                  measures=c("TST_device","TST_ref"),CI.type="boot",boot.type="perc",warnings=FALSE)[,c(1:3,10:15),]
+for(measure in c("SE","SOL","WASO","Light","Deep","REM")){
+  data <- sleep.measures[sleep.measures$group!="CTRL",]
+  if(measure=="SOL"){ data <- data[data$subject!="A042"]}
+  out <- rbind(out,groupDiscr(data=sleep.measures[sleep.measures$group!="CTRL",],
+                              measures=gsub("TST",measure,c("TST_device","TST_ref")),
+                              CI.type="boot",boot.type="perc",warnings=FALSE)[,c(1:3,10:15),])}
+write.csv(out,"gDiscr_insomnia.csv",row.names=FALSE) # saving output for the draft
+knitr::kable(out,caption="Group-level discrepancies in the insomnia group")
+```
+
+<br>
+
+### WHOLE SAMPLE
+
+When considering the whole sample (i.e., with no distinctions between healthy sleepers and the insomnia group), discrepancies in TST, SE and WASO are computed by excluding the 2 outliers highlighted in the previous section: A007 and A034. 
+
+```{r }
+out <- groupDiscr(data=sleep.measures[sleep.measures$subject!="A007" & sleep.measures$subject!="A034",],
+                  measures=c("TST_device","TST_ref"),warnings=FALSE)[,c(1:3,10:15),]
+for(measure in c("SE","SOL","WASO","Light","Deep","REM")){
+  data <- sleep.measures
+  if(measure=="SE"|measure=="WASO"){ data <- data[data$subject!="A007" & data$subject!="A034",]}
+  out <- rbind(out,groupDiscr(data=data,measures=gsub("TST",measure,c("TST_device","TST_ref")),
+                              warnings=FALSE)[,c(1:3,10:15),])}
+write.csv(out,"gDiscr_wholeSample.csv",row.names=FALSE) # saving output for the draft
+knitr::kable(out,caption="Group-level discrepancies in the whole sample")
+```
+
+<br>
+
+## 3.2. Bland-Altman plots  {.tabset .tabset-fade .tabset-pills}
+
+Here, we generate the Bland-Altman plot for each sleep measure, using the the *BAplot.R* function. The function is applied on both the group of healthy sleepers (N = 27), and on the insomnia group (N = 12). PSG-derived measures are plotted on the x axis to represent the size of measurement.
+
+```{r }
+source("functions/BAplot.R")
+```
+
+### HEALTHY SLEEPERS  {.tabset .tabset-fade .tabset-pills}
+
+Discrepancies in healthy sleepers are computed both including and excluding the two outliers highlighted in the previous section (A007 and A034).
+
+#### TST
+
+```{r message=FALSE,warning=FALSE}
+BAplot(data=sleep.measures[sleep.measures$group=="CTRL",],measures=c("TST_device","TST_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+The same plot is generated by **excluding the two outliers** highlighted in section 3.1: A007 and A034.
+
+```{r message=FALSE,warning=FALSE}
+BAplot(data=sleep.measures[sleep.measures$group=="CTRL" & 
+                           sleep.measures$subject!="A007" & sleep.measures$subject!="A034",],
+       measures=c("TST_device","TST_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- Considering all healthy sleepers, TST shows a proportional bias (with higher bias predicted by lower PSG-derived TST) and deviation from normality. 
+
+- The proportional bias and the deviation from normality disappear when the two outliers are excluded. TST is underestimated by FC3.
+
+- The homoscedasticity assumption holds in both cases.
+
+<br>
+
+#### SE
+
+```{r message=FALSE,warning=FALSE}
+BAplot(data=sleep.measures[sleep.measures$group=="CTRL",],measures=c("SE_device","SE_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+The same plot is generated by **excluding the two outliers** highlighted in section 3.1: A007 and A034.
+
+```{r message=FALSE,warning=FALSE}
+BAplot(data=sleep.measures[sleep.measures$group=="CTRL" & 
+                           sleep.measures$subject!="A007" & sleep.measures$subject!="A034",],
+       measures=c("SE_device","SE_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- Considering all healthy sleepers, SE shows a proportional bias (with higher bias predicted by lower PSG-derived SE) and deviation from normality. 
+
+- The proportional bias and the deviation from normality disappear when the two outliers are excluded. SE is underestimated by FC3.
+
+- The homoscedasticity assumption holds in both cases.
+
+<br>
+
+#### SOL
+
+```{r message=FALSE,warning=FALSE}
+BAplot(data=sleep.measures[sleep.measures$group=="CTRL",],measures=c("SOL_device","SOL_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+The same plot is generated by **excluding the two outliers** highlighted in section 3.1: A007 and A034.
+
+```{r message=FALSE,warning=FALSE}
+BAplot(data=sleep.measures[sleep.measures$group=="CTRL" & 
+                           sleep.measures$subject!="A007" & sleep.measures$subject!="A034",],
+       measures=c("SOL_device","SOL_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- SOL shows a proportional bias (with higher bias predicted by lower PSG-derived SOL), heteroscedasticity (with wider range of discrepancies predicted by higher PSG-derived SOL), and deviation from normality. 
+
+- Proportional bias disappears by removing the two outliers, whereas deviation from normality and heteroscedasticity are still detected.
+
+```{r message=FALSE,warning=FALSE}
+# heterosced.
+sleep.measures$SOL_diff <- sleep.measures$SOL_device - sleep.measures$SOL_ref
+m <- lm(SOL_diff~SOL_ref,data=sleep.measures[sleep.measures$group=="CTRL",])
+df <- data.frame(SOL_ref=sleep.measures[sleep.measures$group=="CTRL","SOL_ref"],
+                 SOL_res <- abs(resid(m)))
+summary(lm(SOL_res~SOL_ref,data=df))$coefficients
+```
+
+- Since data are not normally distributed, the results for SOL discrepancies should be interpreted with caution.
+
+<br>
+
+#### WASO
+
+```{r message=FALSE,warning=FALSE}
+BAplot(data=sleep.measures[sleep.measures$group=="CTRL",],measures=c("WASO_device","WASO_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+The same plot is generated by **excluding the two outliers** highlighted in section 3.1: A007 and A034.
+
+```{r message=FALSE,warning=FALSE}
+BAplot(data=sleep.measures[sleep.measures$group=="CTRL" & 
+                           sleep.measures$subject!="A007" & sleep.measures$subject!="A034",],
+       measures=c("WASO_device","WASO_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- Considering all healthy sleepers, WASO shows a proportional bias (with higher bias predicted by higher PSG-derived WASO) and deviation from normality. 
+
+- The proportional bias and the deviation from normality disappear when the two outliers are excluded. WASO is overestimated by FC3.
+
+- The homoscedasticity assumption holds in both cases.
+
+<br>
+
+#### Light
+
+```{r message=FALSE, warning=FALSE}
+BAplot(data=sleep.measures[sleep.measures$group=="CTRL",],measures=c("Light_device","Light_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+The same plot is generated by **excluding the two outliers** highlighted in section 3.1: A007 and A034.
+
+```{r message=FALSE, warning=FALSE}
+BAplot(data=sleep.measures[sleep.measures$group=="CTRL" & 
+                           sleep.measures$subject!="A007" & sleep.measures$subject!="A034",],
+       measures=c("Light_device","Light_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- Light sleep duration shows a proportional bias (with higher bias predicted by lower PSG-derived light duration), also after the removal of the two outliers.
+
+- Differences between Fitbit- and PSG-derived light sleep duration are normally distributed, and data are homoscedastic.
+
+<br>
+
+#### Deep
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$group=="CTRL",],measures=c("Deep_device","Deep_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+The same plot is generated by **excluding the two outliers** highlighted in section 3.1: A007 and A034.
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$group=="CTRL" & 
+                           sleep.measures$subject!="A007" & sleep.measures$subject!="A034",],
+       measures=c("Deep_device","Deep_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- Deep sleep duration shows a proportional bias (with higher bias predicted by higher PSG-derived deep duration), also after the removal of the two outliers.
+
+- Differences between Fitbit- and PSG-derived deep sleep duration are normally distributed, and data are homoscedastic.
+
+<br>
+
+#### REM
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$group=="CTRL",],measures=c("REM_device","REM_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+The same plot is generated by **excluding the two outliers** highlighted in section 3.1: A007 and A034.
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$group=="CTRL" & 
+                           sleep.measures$subject!="A007" & sleep.measures$subject!="A034",],
+       measures=c("REM_device","REM_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- Differences in REM sleep duration are normally distributed and homoscedastic. No proportional bias is detected.
+
+- The presence of the two outliers is irrelevant for discrepancies in REM sleep duration.
+
+<br>
+
+### INSOMNIA  {.tabset .tabset-fade .tabset-pills}
+
+#### TST
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$group!="CTRL",],measures=c("TST_device","TST_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="boot", boot.type="perc", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- Differences in TST are normally distributed and homoscedastic. No proportional bias is detected.
+
+- TST is underestimated by FC3:
+
+```{r }
+library(MKinfer)
+boot.t.test(sleep.measures[sleep.measures$group!="CTRL","TST_device"],
+            sleep.measures[sleep.measures$group!="CTRL","TST_ref"],
+            paired=TRUE,alternative="less",R=10000)
+```
+
+<br>
+
+#### SE
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$group!="CTRL",],measures=c("SE_device","SE_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="boot", boot.type="perc", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- Differences in SE are normally distributed and homoscedastic
+
+- A proportional bias is detected:
+
+```{r }
+sleep.measures$SE_diff <- sleep.measures$SE_device - sleep.measures$SE_ref
+summary(lm(SE_diff~SE_ref,data=sleep.measures[sleep.measures$group!="CTRL",]))
+```
+
+<br>
+
+#### SOL
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$group!="CTRL",],measures=c("SOL_device","SOL_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="boot", boot.type="perc", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+The same plot is generated by **excluding the outlier** highlighted in section 3.1: A042.
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$group!="CTRL" & sleep.measures$subject!="A042",],
+       measures=c("SOL_device","SOL_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="boot", boot.type="perc", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- Considering all subjects in the insomnia group, SOL shows a proportional bias (with higher bias predicted by higher PSG-derived WASO) and deviation from normality. 
+
+- The deviation from normality disappear when the outlier is excluded, but the proportional bias is still significant.
+
+- The homoscedasticity assumption holds in both cases.
+
+<br>
+
+#### WASO
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$group!="CTRL",],measures=c("WASO_device","WASO_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="boot", boot.type="perc", CI.level=.95, warnings=TRUE)
+```
+
+The same plot is generated by **excluding the outlier** highlighted in section 3.1: A042.
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$group!="CTRL" & sleep.measures$subject!="A042",],
+       measures=c("WASO_device","WASO_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="boot", boot.type="perc", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- Differences in WASO are normally distributed and homoscedastic. No proportional bias is detected.
+
+- The highlighted outlier is almost irrelevant for computing WASO discrepancies in the insomnia group.
+
+- WASO is underestimated by FC3:
+
+```{r }
+boot.t.test(sleep.measures[sleep.measures$group!="CTRL","WASO_device"],
+            sleep.measures[sleep.measures$group!="CTRL","WASO_ref"],
+            paired=TRUE,alternative="greater",R=10000)
+```
+
+<br>
+
+#### Light
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$group!="CTRL",],measures=c("Light_device","Light_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="boot", boot.type="perc", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- Differences in light sleep duration are normally distributed and homoscedastic. No proportional bias is detected.
+
+<br>
+
+#### Deep
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$group!="CTRL",],measures=c("Deep_device","Deep_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="boot", boot.type="perc", CI.level=.95, warnings=TRUE)
+```
+
+- Differences in deep sleep duration are normally distributed and homoscedastic. No proportional bias is detected.
+
+- Deep sleep duration is underestimated by FC3:
+
+```{r }
+boot.t.test(sleep.measures[sleep.measures$group!="CTRL","Deep_device"],
+            sleep.measures[sleep.measures$group!="CTRL","Deep_ref"],
+            paired=TRUE,alternative="less",R=10000)
+```
+
+#### REM
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$group!="CTRL",],measures=c("REM_device","REM_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="boot", boot.type="perc", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- Differences in REM sleep duration are normally distributed and homoscedastic. No proportional bias is detected.
+
+<br>
+
+### WHOLE SAMPLE {.tabset .tabset-fade .tabset-pills}
+
+Here, Bland-Altman plots are generated considering the whole sample (i.e., with no distinction between healthy sleepers and the insomnia group).
+
+#### TST
+
+```{r }
+BAplot(data=sleep.measures,measures=c("TST_device","TST_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+The same plot is generated by **excluding the two outliers** highlighted in section 3.1: A007 and A034.
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$subject!="A007" & sleep.measures$subject!="A034",],
+       measures=c("TST_device","TST_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- Considering all subjects, TST shows a proportional bias (with higher bias predicted by lower PSG-derived TST) and deviation from normality. 
+
+- The proportional bias and the deviation from normality disappear when the two outliers are excluded.
+
+- The homoscedasticity assumption holds in both cases.
+
+<br>
+
+#### SE
+
+```{r }
+BAplot(data=sleep.measures,measures=c("SE_device","SE_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+The same plot is generated by **excluding the two outliers** highlighted in section 3.1: A007 and A034.
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$subject!="A007" & sleep.measures$subject!="A034",],
+       measures=c("SE_device","SE_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- Considering all subject, SE shows a proportional bias (with higher bias predicted by lower PSG-derived SE), heteroscedasticity, and deviation from normality. 
+
+- Heteroscedasticity and deviation from normality disappear when the two outliers are excluded.
+
+- The proportional bias is still present when excluding the two outliers.
+
+<br>
+
+#### SOL
+
+```{r }
+BAplot(data=sleep.measures,measures=c("SOL_device","SOL_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+The same plot is generated by **excluding the outlier** highlighted for the insomnia group: A042.
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$subject!="A042",],
+       measures=c("SOL_device","SOL_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- When considering all subjects, SOL shows a proportional bias (with higher bias predicted by lower PSG-derived SOL) and deviation from normality. 
+
+- Proportional bias and deviation from normality are not solved by removing the outlier. Moreover, this leads to higher differences variability for higher compared to lower PSG-derived SOL (heteroscedasticity).
+
+- Since data are not normally distributed, the results for SOL discrepancies should be interpreted with caution.
+
+<br>
+
+#### WASO
+
+```{r }
+BAplot(data=sleep.measures,measures=c("WASO_device","WASO_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+The same plot is generated by **excluding the two outliers** highlighted in section 3.1: A007 and A034.
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$subject!="A007" & sleep.measures$subject!="A034",],
+       measures=c("WASO_device","WASO_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- Considering all subjects, WASO shows a proportional bias (with higher bias predicted by higher PSG-derived WASO), heteroscedasticity (with higher variability in WASO differences for higher compared to lower PSG-derived WASO), and deviation from normality. 
+
+- The proportional bias and the deviation from normality disappear when the two outliers are excluded, whereas heteroscedasticity is still present in the data.
+
+<br>
+
+#### Light
+
+```{r }
+BAplot(data=sleep.measures,measures=c("Light_device","Light_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+The same plot is generated by **excluding the two outliers** highlighted in section 3.1: A007 and A034.
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$subject!="A007" & sleep.measures$subject!="A034",],
+       measures=c("Light_device","Light_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- Light sleep duration shows a proportional bias (with higher bias predicted by lower PSG-derived light duration), also after the removal of the two outliers.
+
+- Differences between Fitbit- and PSG-derived light sleep duration are normally distributed, and data are homoscedastic.
+
+<br>
+
+#### Deep
+
+```{r }
+BAplot(data=sleep.measures,measures=c("Deep_device","Deep_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+The same plot is generated by **excluding the two outliers** highlighted in section 3.1: A007 and A034.
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$subject!="A007" & sleep.measures$subject!="A034",],
+       measures=c("Deep_device","Deep_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- Deep sleep duration shows a proportional bias (with higher bias predicted by higher PSG-derived deep duration), also after the removal of the two outliers.
+
+- Differences between Fitbit- and PSG-derived deep sleep duration are normally distributed, and data are homoscedastic.
+
+<br>
+
+#### REM
+
+```{r }
+BAplot(data=sleep.measures,measures=c("REM_device","REM_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+The same plot is generated by **excluding the two outliers** highlighted in section 3.1: A007 and A034.
+
+```{r }
+BAplot(data=sleep.measures[sleep.measures$subject!="A007" & sleep.measures$subject!="A034",],
+       measures=c("REM_device","REM_ref"), 
+       logTransf = FALSE, xaxis="reference", CI.type="classic", CI.level=.95, warnings=TRUE)
+```
+
+<br>
+
+*Comments:*
+
+- Differences in REM sleep duration are normally distributed and homoscedastic. No proportional bias is detected.
+
+- The presence of the two outliers is irrelevant for discrepancies in REM sleep duration.
+
+<br>
+
+### AGGREGATE PLOT
+
+Here, we generate the aggregate plot to be included in the manuscript, including the main sleep measures in the group of healthy sleepers. We use a modified version of the *BAplot.R* function.
+
+<details><summary>Show code</summary>
+<p>
+```{r warning=FALSE,message=FALSE}
+BAplot <- function(data=NA,measures=c("TST_device","TST_ref"),logTransf=FALSE,
+                   xaxis="reference",CI.type="classic",boot.type="basic",CI.level=.95,
+                   xlim=NA,ylim=NA,bcol="red",bCIcol="red",LOAcol="darkgray",
+                   LOACIcol="darkgray",bsize=1.5,LOAsize=1.3,CIsize=1){
+  windowsFonts(CMU=windowsFont("CMU Serif Roman"),Times=windowsFont("Times New Roman"))
+  require(BlandAltmanLeh); require(ggplot2); require(ggExtra)
+  
+  # setting labels
+  Measure <- gsub("_ref","",gsub("_device","",measures[1]))
+  measure <- gsub("TST","total sleep time (min)",Measure)
+  measure <- gsub("SE","sleep efficiency (%)",measure)
+  measure <- gsub("SOL","sleep onset latency (min)",measure)
+  measure <- gsub("WASO","wake after sleep onset (min)",measure)
+  measure <- gsub("LightPerc","light sleep percentage (%)",measure)
+  measure <- gsub("DeepPerc","deep sleep percentage (%)",measure)
+  measure <- gsub("REMPerc","REM sleep percentage (%)",measure)
+  measure <- gsub("Light","light sleep duration (min)",measure)
+  measure <- gsub("Deep","deep sleep duration (min)",measure)
+  if(grepl("REM",measure) & !grepl("%",measure)) { measure <- gsub("REM","REM sleep duration (min)",measure) }
+  
+  # packages and functions to be used with boostrap CI
+  if(CI.type=="boot"){ require(DescTools); require(boot)
+    # function to generate bootstrap CI for model parameters
+    boot.reg <- function(data,formula,indices){ return(coef(lm(formula,data=data[indices,]))[2]) }
+    # function for sampling and predicting Y values based on model
+    boot.pred <- function(data,formula,tofit) { indices <- sample(1:nrow(data),replace = TRUE)
+    fit <- lm(formula,data=data[indices,])
+    return(predict(fit, newdata=data.frame(tofit))) } 
+  } else if(CI.type!="classic") { stop("Error: CI.type can be either 'classic' or 'boot'") }
+  
+  # data to be used (here we differentiate beetween healthy sleepers and all)
+  all <- data # all participants
+  all$group <- as.character(all$group)
+  all[all$group!="CTRL","group"] <- "INS"
+  all$group <- as.factor(all$group)
+  data <- data[data$group=="CTRL",] # subsampling only CTRL
+  ba.stat <- bland.altman.stats(data[,measures[1]],data[,measures[2]],conf.int=CI.level)
+  ba.stat.all <- bland.altman.stats(all[,measures[1]],all[,measures[2]],conf.int=CI.level)
+  if(xaxis=="reference"){
+    ba <- data.frame(size=ba.stat$groups$group2,diffs=ba.stat$diffs)
+    ba.all <- data.frame(size=ba.stat.all$groups$group2,diffs=ba.stat.all$diffs,group=all$group)
+    xlab <- paste("PSG",measure)
+  } else if(xaxis=="mean"){
+    ba <- data.frame(size=ba.stat$means,diffs=ba.stat$diffs)
+    ba.all <- data.frame(size=ba.stat.all$means,diffs=ba.stat.all$diffs,group=all$group)
+    xlab <- paste("Mean",measure,"by PSG and FC3")
+  } else { stop("Error: xaxis argument can be either 'reference' or 'mean'") }
+  
+  # range of values to be fitted for drawing the lines (i.e., from min to max of x-axis values, by .1)
+  # size <- seq(min(ba$size),max(ba$size),(max(ba$size)-min(ba$size))/((max(ba$size)-min(ba$size))*10))
+  size <- seq(min(ba.all$size),max(ba.all$size),(max(ba.all$size)-min(ba.all$size))/((max(ba.all$size)-min(ba.all$size))*10))
+  
+  # basic plot
+  p <- ggplot(data=ba,aes(size,diffs))
+  
+  # ................................
+  # 1. USING ORIGINAL DATA
+  # ................................ 
+  if(logTransf == FALSE){
+    
+    # A) testing normality of differences with shapiro-wilk test
+    shapiro <- shapiro.test(ba$diffs)
+    
+    # B) testing relationship between differences and size of measurement (proportional bias)
+    m <- lm(diffs~size,ba)
+    if(CI.type=="classic"){ CI <- confint(m,level=CI.level)[2,] 
+    } else { CI <- boot.ci(boot(data=ba,statistic=boot.reg,formula=diffs~size,R=10000),type=boot.type)[[4]][4:5] }
+    prop.bias <- ifelse(CI[1] > 0 | CI[2] < 0, TRUE, FALSE)
+    
+    # C) testing relationship between absolute residuals and size of measurement (heteroscedasticity)
+    mRes <- lm(abs(resid(m))~size,ba)
+    if(CI.type=="classic"){ CIRes <- confint(mRes,level=CI.level)[2,]
+    } else { CIRes <- boot.ci(boot(data=ba,statistic=boot.reg,formula=abs(resid(m))~size,R=10000),type=boot.type)[[4]][4:5] }
+    heterosced <- ifelse(CIRes[1] > 0 | CIRes[2] < 0,TRUE,FALSE)
+    
+    # .......................................
+    # 1.1. DIFFERENCES INDEPENDENT FROM SIZE
+    # .......................................
+    if(prop.bias == FALSE){ 
+      
+      if(CI.type=="boot"){ # changing bias CI when CI.type="boot"
+        ba.stat$CI.lines[3] <- MeanCI(ba.stat$diffs,method="boot",btype=boot.type,R=10000)[2]
+        ba.stat$CI.lines[4] <- MeanCI(ba.stat$diffs,method="boot",btype=boot.type,R=10000)[3] }
+      
+      p <- p + # adding lines to plot
+        
+        # bias and CI (i.e., mean diff)
+        geom_line(data=ba.all,aes(y=ba.stat$mean.diffs),colour=bcol,size=bsize) +
+        geom_line(data=ba.all,aes(y=ba.stat$CI.lines[3]),colour=bCIcol,linetype=2,size=CIsize) +
+        geom_line(data=ba.all,aes(y=ba.stat$CI.lines[4]),colour=bCIcol,linetype=2,size=CIsize)
+      
+      # ..........................
+      # 1.1.1. HOMOSCEDASTICITY
+      # ..........................
+      if(heterosced==FALSE){
+        
+        if(CI.type=="boot"){ # changing LOAs CI when CI.type="boot"
+          ba.stat$CI.lines[1] <- MeanCI(ba.stat$diffs-1.96*sd(ba.stat$diffs),method="boot",btype=boot.type,R=10000)[2]
+          ba.stat$CI.lines[2] <- MeanCI(ba.stat$diffs-1.96*sd(ba.stat$diffs),method="boot",btype=boot.type,R=10000)[3]
+          ba.stat$CI.lines[5] <- MeanCI(ba.stat$diffs+1.96*sd(ba.stat$diffs),method="boot",btype=boot.type,R=10000)[2]
+          ba.stat$CI.lines[6] <- MeanCI(ba.stat$diffs+1.96*sd(ba.stat$diffs),method="boot",btype=boot.type,R=10000)[3] }
+        
+        p <- p + # adding lines to plot
+          
+          # Upper LOA and CI (i.e., mean diff + 1.96 SD)
+          geom_line(data=ba.all,aes(y=ba.stat$upper.limit),colour=LOAcol,size=LOAsize) +
+          geom_line(data=ba.all,aes(y=ba.stat$CI.lines[5]),colour=LOACIcol,linetype=2,size=CIsize) +
+          geom_line(data=ba.all,aes(y=ba.stat$CI.lines[6]),colour=LOACIcol,linetype=2,size=CIsize) +
+          
+          # Lower LOA and CI (i.e., mean diff - 1.96 SD)
+          geom_line(data=ba.all,aes(y=ba.stat$lower.limit),colour="darkgray",size=LOAsize) +
+          geom_line(data=ba.all,aes(y=ba.stat$CI.lines[1]),colour="darkgray",linetype=2,size=CIsize) +
+          geom_line(data=ba.all,aes(y=ba.stat$CI.lines[2]),colour="darkgray",linetype=2,size=CIsize)
+        
+        # ...........................
+        # 1.1.2. HETEROSCEDASTICITY
+        # ...........................
+      } else {
+        
+        c0 <- coef(mRes)[1]
+        c1 <- coef(mRes)[2]
+        
+        # modeling LOAs following Bland & Altman (1999): LOAs = meanDiff +- 2.46(c0 + c1A)
+        y.fit <- data.frame(size=size,
+                            y.LOAu = ba.stat$mean.diffs + 2.46*(c0+c1*size),
+                            y.LOAl = ba.stat$mean.diffs - 2.46*(c0+c1*size))
+        
+        # LOAs CI
+        if(CI.type=="classic"){ # classic ci
+          fitted <- predict(mRes,newdata=data.frame(y.fit$size),interval="confidence",level=CI.level) # based on mRes
+          y.fit$y.LOAu.upr <- ba.stat$mean.diffs + 2.46*fitted[,3]
+          y.fit$y.LOAu.lwr <- ba.stat$mean.diffs + 2.46*fitted[,2]
+          y.fit$y.LOAl.upr <- ba.stat$mean.diffs - 2.46*fitted[,3]
+          y.fit$y.LOAl.lwr <- ba.stat$mean.diffs - 2.46*fitted[,2]
+        } else { # boostrap CI
+          fitted <- t(replicate(10000,boot.pred(ba,"abs(resid(lm(diffs ~ size))) ~ size",y.fit)))
+          y.fit$y.LOAu.upr <- ba.stat$mean.diffs + 2.46*apply(fitted,2,quantile,probs=c(CI.level+(1-CI.level)/2))
+          y.fit$y.LOAu.lwr <- ba.stat$mean.diffs + 2.46*apply(fitted,2,quantile,probs=c((1-CI.level)/2))
+          y.fit$y.LOAl.upr <- ba.stat$mean.diffs - 2.46*apply(fitted,2,quantile,probs=c(CI.level+(1-CI.level)/2))
+          y.fit$y.LOAl.lwr <- ba.stat$mean.diffs - 2.46*apply(fitted,2,quantile,probs=c((1-CI.level)/2)) }
+        
+        p <- p + # adding lines to plot
+          
+          # Upper LOA and CI (i.e., mean diff + 2.46(c0 + c1 * size))
+          geom_line(data=y.fit,aes(y=y.LOAu),colour=LOAcol,size=LOAsize) +
+          geom_line(data=y.fit,aes(y=y.LOAu.upr),colour=LOACIcol,linetype=2,size=CIsize) +
+          geom_line(data=y.fit,aes(y=y.LOAu.lwr),colour=LOACIcol,linetype=2,size=CIsize) +
+          
+          # Lower LOA and CI (i.e., mean diff - 2.46(c0 + c1 * size))
+          geom_line(data=y.fit,aes(y=y.LOAl),colour=LOAcol,size=LOAsize) +
+          geom_line(data=y.fit,aes(y=y.LOAl.upr),colour=LOACIcol,linetype=2,size=CIsize) +
+          geom_line(data=y.fit,aes(y=y.LOAl.lwr),colour=LOACIcol,linetype=2,size=CIsize) }
+      
+      # .......................................
+      # 1.2. DIFFERENCES PROPORTIONAL TO SIZE
+      # .......................................
+    } else {
+      
+      b0 <- coef(m)[1]
+      b1 <- coef(m)[2]
+      
+      # modeling bias following Bland & Altman (1999): D = b0 + b1 * size
+      y.fit <- data.frame(size,y.bias=b0+b1*size) 
+      
+      # bias CI
+      if(CI.type=="classic"){ # classic ci
+        y.fit$y.biasCI.upr <- predict(m,newdata=data.frame(y.fit$size),interval="confidence",level=CI.level)[,3]
+        y.fit$y.biasCI.lwr <- predict(m,newdata=data.frame(y.fit$size),interval="confidence",level=CI.level)[,2]
+      } else { # boostrap CI 
+        fitted <- t(replicate(10000,boot.pred(ba,"diffs~size",y.fit))) # sampling CIs
+        y.fit$y.biasCI.upr <- apply(fitted,2,quantile,probs=c((1-CI.level)/2))
+        y.fit$y.biasCI.lwr <- apply(fitted,2,quantile,probs=c(CI.level+(1-CI.level)/2)) }
+      
+      p <- p + # adding lines to plot
+        
+        # bias and CI (i.e., D = b0 + b1 * size)
+        geom_line(data=y.fit,aes(y=y.bias),colour=bcol,size=bsize) +
+        geom_line(data=y.fit,aes(y=y.biasCI.upr),colour=bCIcol,linetype=2,size=CIsize) +
+        geom_line(data=y.fit,aes(y=y.biasCI.lwr),colour=bCIcol,linetype=2,size=CIsize)
+      
+      # ..........................
+      # 1.2.1. HOMOSCEDASTICITY
+      # ..........................
+      if(heterosced==FALSE){
+        
+        # modeling LOAs: LOAs = bias +- 1.96sd of the residuals
+        y.fit$y.LOAu = b0+b1*size + 1.96*sd(resid(m))
+        y.fit$y.LOAl = b0+b1*size - 1.96*sd(resid(m))
+        
+        # LOAs CI based on bias CI
+        y.fit$y.LOAu.upr <- y.fit$y.biasCI.upr + 1.96*sd(resid(m))
+        y.fit$y.LOAu.lwr <- y.fit$y.biasCI.lwr + 1.96*sd(resid(m))
+        y.fit$y.LOAl.upr <- y.fit$y.biasCI.upr - 1.96*sd(resid(m))
+        y.fit$y.LOAl.lwr <- y.fit$y.biasCI.lwr - 1.96*sd(resid(m))
+        
+        # ...........................
+        # 1.2.2. HETEROSCEDASTICITY
+        # ...........................
+      } else {
+        
+        c0 <- coef(mRes)[1]
+        c1 <- coef(mRes)[2]
+        
+        # modeling LOAs: LOAs = b0 + b1 * size +- 2.46(c0 + c1A) 
+        y.fit$y.LOAu = b0+b1*size + 2.46*(c0+c1*size)
+        y.fit$y.LOAl = b0+b1*size - 2.46*(c0+c1*size)
+        
+        # LOAs CI
+        if(CI.type=="classic"){ # classic ci
+          fitted <- predict(mRes,newdata=data.frame(y.fit$size),interval="confidence",level=CI.level) # based on mRes
+          y.fit$y.LOAu.upr <- b0+b1*size + 2.46*fitted[,3]
+          y.fit$y.LOAu.lwr <- b0+b1*size + 2.46*fitted[,2]
+          y.fit$y.LOAl.upr <- b0+b1*size - 2.46*fitted[,3]
+          y.fit$y.LOAl.lwr <- b0+b1*size - 2.46*fitted[,2] 
+        } else { # boostrap CI
+          fitted <- t(replicate(10000,boot.pred(ba,"abs(resid(lm(diffs ~ size))) ~ size",y.fit)))
+          y.fit$y.LOAu.upr <- b0+b1*size + 2.46*apply(fitted,2,quantile,probs=c(CI.level+(1-CI.level)/2))
+          y.fit$y.LOAu.lwr <- b0+b1*size + 2.46*apply(fitted,2,quantile,probs=c((1-CI.level)/2))
+          y.fit$y.LOAl.upr <- b0+b1*size - 2.46*apply(fitted,2,quantile,probs=c(CI.level+(1-CI.level)/2))
+          y.fit$y.LOAl.lwr <- b0+b1*size - 2.46*apply(fitted,2,quantile,probs=c((1-CI.level)/2)) }}
+      
+      p <- p + # adding lines to plot
+        
+        # Upper LOA and CI (i.e., b0 + b1 * size + 2.46(c0 + c1 * size))
+        geom_line(data=y.fit,aes(y=y.LOAu),colour=LOAcol,size=LOAsize) +
+        geom_line(data=y.fit,aes(y=y.LOAu.upr),colour=LOACIcol,linetype=2,size=CIsize) +
+        geom_line(data=y.fit,aes(y=y.LOAu.lwr),colour=LOACIcol,linetype=2,size=CIsize) +
+        
+        # Lower LOA and CI (i.e., b0 + b1 * size - 2.46(c0 + c1 * size))
+        geom_line(data=y.fit,aes(y=y.LOAl),colour=LOAcol,size=LOAsize) +
+        geom_line(data=y.fit,aes(y=y.LOAl.upr),colour=LOACIcol,linetype=2,size=CIsize) +
+        geom_line(data=y.fit,aes(y=y.LOAl.lwr),colour=LOACIcol,linetype=2,size=CIsize) }
+    
+    # ................................
+    # 2. USING LOG TRANSFORMED DATA
+    # ................................ 
+  } else {
+    
+    # log transformation of data (add little constant to avoid Inf values)
+    cat("Log transforming the data ...\n\n")
+    ba.stat$groups$LOGgroup1 <- log(ba.stat$groups$group1 + .0001)
+    ba.stat$groups$LOGgroup2 <- log(ba.stat$groups$group2 + .0001)
+    ba.stat$groups$LOGdiff <- ba.stat$groups$LOGgroup1 - ba.stat$groups$LOGgroup2
+    if(xaxis=="reference"){ baLog <- data.frame(size=ba.stat$groups$LOGgroup2,diffs=ba.stat$groups$LOGdiff)
+    } else { baLog <- data.frame(size=(ba.stat$groups$LOGgroup1 + ba.stat$groups$LOGgroup2)/2,diffs=ba.stat$groups$LOGdiff) }
+    
+    # A) testing normality of differences with shapiro-wilk test
+    shapiro <- shapiro.test(baLog$diffs)
+    
+    # B) testing relationship between differences and size of measurement (proportional bias)
+    m <- lm(diffs~size,ba) # note: this is tested only on original data
+    if(CI.type=="classic"){ CI <- confint(m,level=CI.level)[2,] 
+    } else { CI <- boot.ci(boot(data=ba,statistic=boot.reg,formula=diffs~size,R=10000),type=boot.type)[[4]][4:5] }
+    prop.bias <- ifelse(CI[1] > 0 | CI[2] < 0, TRUE, FALSE)
+    
+    # C) testing relationship between absolute residuals and size of measurement (heteroscedasticity)
+    mRes <- lm(abs(resid(m))~size,baLog)
+    if(CI.type=="classic"){ CIRes <- confint(mRes,level=CI.level)[2,]
+    } else { CIRes <- boot.ci(boot(data=baLog,statistic=boot.reg,formula=abs(resid(m))~size,R=10000),type=boot.type)[[4]][4:5] }
+    heterosced <- ifelse(CIRes[1] > 0 | CIRes[2] < 0,TRUE,FALSE)
+    
+    # LOAs slope following Euser et al (2008) for antilog transformation: slope = 2 * (e^(1.96 SD) - 1)/(e^(1.96 SD) + 1)
+    ANTILOGslope <- function(x){ 2 * (exp(1.96 * sd(x)) - 1) / (exp(1.96*sd(x)) + 1) }
+    ba.stat$LOA.slope <- ANTILOGslope(baLog$diffs)
+    
+    # LOAs CI slopes 
+    if(CI.type=="classic"){ # classic CI
+      t1 <- qt((1 - CI.level)/2, df = ba.stat$based.on - 1) # t-value right
+      t2 <- qt((CI.level + 1)/2, df = ba.stat$based.on - 1) # t-value left
+      ba.stat$LOA.slope.CI.upper <- 2 * (exp(1.96 * sd(baLog$diffs) + t2 * sqrt(sd(baLog$diffs)^2 * 3/ba.stat$based.on)) - 1) /
+        (exp(1.96*sd(baLog$diffs) + t2 * sqrt(sd(baLog$diffs)^2 * 3/ba.stat$based.on)) + 1)
+      ba.stat$LOA.slope.CI.lower <- 2 * (exp(1.96 * sd(baLog$diffs) + t1 * sqrt(sd(baLog$diffs)^2 * 3/ba.stat$based.on)) - 1) /
+        (exp(1.96*sd(baLog$diffs) + t1 * sqrt(sd(baLog$diffs)^2 * 3/ba.stat$based.on)) + 1)
+    } else { # boostrap CI
+      ba.stat$LOA.slope.CI.upper <- BootCI(baLog$diffs,FUN=ANTILOGslope,bci.method=boot.type,R=10000)[3]
+      ba.stat$LOA.slope.CI.lower <- BootCI(baLog$diffs,FUN=ANTILOGslope,bci.method=boot.type,R=10000)[2] }
+    
+    # Recomputing LOAs and their CIs as a function of size multiplied by the computed slopes
+    y.fit <- data.frame(size,
+                        ANTLOGdiffs.upper = size * ba.stat$LOA.slope, # upper LOA
+                        ANTLOGdiffs.upper.lower = size * ba.stat$LOA.slope.CI.lower,
+                        ANTLOGdiffs.upper.upper = size * ba.stat$LOA.slope.CI.upper,
+                        ANTLOGdiffs.lower = size * ((-1)*ba.stat$LOA.slope), # lower LOA
+                        ANTLOGdiffs.lower.lower = size * ((-1)*ba.stat$LOA.slope.CI.lower),
+                        ANTLOGdiffs.lower.upper = size * ((-1)*ba.stat$LOA.slope.CI.upper))
+    
+    # .......................................
+    # 2.1. DIFFERENCES INDEPENDENT FROM SIZE
+    # .......................................
+    if(prop.bias == FALSE){ 
+      
+      if(CI.type=="boot"){ # changing bias CI when CI.type="boot"
+        ba.stat$CI.lines[3] <- MeanCI(ba$diffs,method="boot",btype=boot.type,R=10000)[2]
+        ba.stat$CI.lines[4] <- MeanCI(ba$diffs,method="boot",btype=boot.type,R=10000)[3] }
+      
+      p <- p + # adding lines to plot
+        
+        # bias and CI (i.e., mean diff)
+        geom_line(aes(y=ba.stat$mean.diffs),colour=bcol,size=bsize) +
+        geom_line(aes(y=ba.stat$CI.lines[3]),colour=bCIcol,linetype=2,size=CIsize) +
+        geom_line(aes(y=ba.stat$CI.lines[4]),colour=bCIcol,linetype=2,size=CIsize) +
+        
+        # UPPER LIMIT (i.e., mean diff + 2 * (e^(1.96 SD) - 1)/(e^(1.96 SD) + 1))
+        geom_line(data=y.fit,aes(y=ba.stat$mean.diffs + ANTLOGdiffs.upper),colour=LOAcol,size=LOAsize) +
+        geom_line(data=y.fit,aes(y=ba.stat$mean.diffs + ANTLOGdiffs.upper.upper),colour=LOACIcol,linetype=2,size=CIsize) +
+        geom_line(data=y.fit,aes(y=ba.stat$mean.diffs + ANTLOGdiffs.upper.lower),colour=LOACIcol,linetype=2,size=CIsize) +
+        
+        # LOWER LIMIT (i.e., mean diff - 2 * (e^(1.96 SD) - 1)/(e^(1.96 SD) + 1))
+        geom_line(data=y.fit,aes(y=ba.stat$mean.diffs + ANTLOGdiffs.lower),colour=LOAcol,size=LOAsize) +
+        geom_line(data=y.fit,aes(y=ba.stat$mean.diffs + ANTLOGdiffs.lower.upper),colour=LOACIcol,linetype=2,size=CIsize) +
+        geom_line(data=y.fit,aes(y=ba.stat$mean.diffs + ANTLOGdiffs.lower.lower),colour=LOACIcol,linetype=2,size=CIsize) 
+      
+      # .......................................
+      # 2.2. DIFFERENCES PROPORTIONAL TO SIZE
+      # .......................................
+    } else {
+      
+      # modeling bias following Bland & Altman (1999): D = b0 + b1 * size
+      b0 <- coef(m)[1]
+      b1 <- coef(m)[2]
+      y.fit$y.bias = b0 + b1*size
+      
+      # bias CI
+      if(CI.type=="classic"){ # classic ci
+        y.fit$y.biasCI.upr <- predict(m,newdata=data.frame(y.fit$size),interval="confidence",level=CI.level)[,3]
+        y.fit$y.biasCI.lwr <- predict(m,newdata=data.frame(y.fit$size),interval="confidence",level=CI.level)[,2]
+      } else { # boostrap CI 
+        fitted <- t(replicate(10000,boot.pred(ba,"diffs~size",y.fit))) # sampling CIs
+        y.fit$y.biasCI.upr <- apply(fitted,2,quantile,probs=c((1-CI.level)/2))
+        y.fit$y.biasCI.lwr <- apply(fitted,2,quantile,probs=c(CI.level+(1-CI.level)/2)) }
+      
+      p <- p + # adding lines to plot
+        
+        # bias and CI (i.e., D = b0 + b1 * size)
+        geom_line(data=y.fit,aes(y = y.bias),colour=bcol,size=bsize) +
+        geom_line(data=y.fit,aes(y = y.biasCI.upr),colour=bCIcol,linetype=2,size=CIsize) +
+        geom_line(data=y.fit,aes(y = y.biasCI.lwr),colour=bCIcol,linetype=2,size=CIsize) +
+        
+        # UPPER LIMIT (i.e., b0 + b1 * size + 2 * (e^(1.96 SD) - 1)/(e^(1.96 SD) + 1))
+        geom_line(data=y.fit,aes(y = y.bias + ANTLOGdiffs.upper),colour=LOAcol,size=LOAsize) +
+        geom_line(data=y.fit,aes(y = y.bias + ANTLOGdiffs.upper.upper),colour=LOACIcol,linetype=2,size=CIsize) +
+        geom_line(data=y.fit,aes(y = y.bias + ANTLOGdiffs.upper.lower),colour=LOACIcol,linetype=2,size=CIsize) +
+        
+        # LOWER LIMIT (i.e., b0 + b1 * size - 2 * (e^(1.96 SD) - 1)/(e^(1.96 SD) + 1))
+        geom_line(data=y.fit,aes(y = y.bias + ANTLOGdiffs.lower),colour=LOAcol,size=LOAsize) +
+        geom_line(data=y.fit,aes(y = y.bias + ANTLOGdiffs.lower.upper),colour=LOACIcol,linetype=2,size=CIsize) +
+        geom_line(data=y.fit,aes(y = y.bias + ANTLOGdiffs.lower.lower),colour=LOACIcol,linetype=2,size=CIsize) }
+    
+    }
+  
+  
+  p <- p + # adding last graphical elements and plotting with marginal density distribution
+    
+    geom_point(data=ba.all,aes(col=group,shape=group),size=3) +
+    xlab(xlab) + ylab(paste("FC3 - PSG differences in\n",measure,sep="")) +
+    scale_color_manual(values=c("black",rgb(0.56, 0.79, 0.94,alpha=.7))) +
+    # ggtitle(paste("Bland-Altman plot of",measure))+
+    theme(axis.text = element_text(size=12,face="bold",family="CMU"),
+          axis.title = element_text(size=12,colour="black",family="CMU"),
+          legend.position="none")
+  
+  if(!is.na(ylim[1])){ p <- p + ylim(ylim) }
+  if(!is.na(xlim[1])){ p <- p + xlim(xlim) }
+  return(ggMarginal(p,fill="lightgray",colour="lightgray",size=4,margins="y"))
+  
+}
+
+library(ggplot2); library(gridExtra); library(ggpubr)
+
+# creating leged (distinguishing only between CTRL and insomnia)
+groups <- sleep.measures
+groups$Group <- "Healthy sleepers"
+for(i in 1:nrow(groups)) if(groups[i,"group"]!="CTRL") groups[i,"Group"] <- "Insomnia symptoms"
+windowsFonts(CMU=windowsFont("CMU Serif Roman"),Times=windowsFont("Times New Roman"))
+legend <- get_legend(ggplot(groups,aes(x=TST_device,y=TST_ref,col=Group,shape=Group))+
+                       geom_point(size=3)+
+                       scale_color_manual(name=NULL,values=c("black",rgb(0.56, 0.79, 0.94,alpha=.7)))+
+                       scale_shape_manual(name=NULL,values=c(16,17))+
+                       theme(legend.position = "bottom",
+                             text=element_text(size=12,face="bold",family="CMU")))
+
+# plotting
+p1 <- BAplot(data=sleep.measures[sleep.measures$subject!="A007" & sleep.measures$subject!="A034",],
+                    measures=c("TST_device","TST_ref"))
+p2 <- BAplot(data=sleep.measures[sleep.measures$subject!="A007" & sleep.measures$subject!="A034",],
+                    measures=c("SE_device","SE_ref"))
+p3 <- BAplot(data=sleep.measures[sleep.measures$subject!="A007" & sleep.measures$subject!="A034",],
+                    measures=c("WASO_device","WASO_ref"))
+p4 <- BAplot(data=sleep.measures,
+                    measures=c("Light_device","Light_ref"))
+p5 <- BAplot(data=sleep.measures,
+                    measures=c("Deep_device","Deep_ref"))
+p6 <- BAplot(data=sleep.measures,
+                    measures=c("REM_device","REM_ref"))
+```
+</p>
+</details>
+
+```{r out.width='100%',message=FALSE,warning=FALSE}
+p <- grid.arrange(legend, p1, p2, p3, p4, p5, p6, ncol=2, nrow = 4, 
+             layout_matrix = rbind(c(1,1),c(2,3),c(4,5),c(6,7)),
+             widths = c(2.7, 2.7), heights = c(.2,2.5,2.5,2.5))
+# ggsave("Figure1_BAplot.tiff",plot=p,dpi=300) # saving plot
+```
+
+<br>
+
+# 4. EBE analysis
+
+The second analytical step is the evaluation of Fitbit performance on an epoch-by-epoch (EBE) basis, as compared to the reference method. As done for discrepancies, the **demos** dataset is used to split the EBE sample between the group of healthy sleepers (N = 27) and the insomnia group (N = 12).
+```{r }
+# adding group column to ebe dataset
+ebe <- plyr::join(ebe,demos[,c("subject","group")],type="full",by="subject")
+```
+
+<br>
+
+## 4.1. Error matrix {.tabset .tabset-fade .tabset-pills}
+
+Here, the proportional error matrix, reporting the group average proportion of epochs in each condition, is computed from device and reference EBE classifications using the the *errorMatrix.R* function. Boostrap CI with percentile method are computed for the sample of adolescents with insomnia symptoms.
+```{r }
+source("functions/errorMatrix.R")
+```
+
+### HEALTHY SLEEPERS
+
+```{r message=FALSE,warning=FALSE}
+(e <- errorMatrix(data=ebe[ebe$group=="CTRL",],idCol="subject",RefCol="PSG",deviceCol="Fitbit",
+            staging=TRUE,stages=c(wake=10,light=2,deep=3,REM=5),matrixType="prop",CI.type="classic"))
+write.csv(e,"errorMatrix_HealthySleepers.csv",row.names=FALSE) # saving result
+```
+
+<br>
+
+### INSOMNIA 
+
+```{r message=FALSE,warning=FALSE}
+(e <- errorMatrix(data=ebe[ebe$group!="CTRL",],idCol="subject",RefCol="PSG",deviceCol="Fitbit",
+            staging=TRUE,stages=c(wake=10,light=2,deep=3,REM=5),matrixType="prop",CI.type="boot",boot.type="perc"))
+write.csv(e,"errorMatrix_Insomnia.csv",row.names=FALSE) # saving result
+```
+
+<br>
+
+### WHOLE SAMPLE 
+
+```{r message=FALSE,warning=FALSE}
+(e <- errorMatrix(data=ebe,idCol="subject",RefCol="PSG",deviceCol="Fitbit",
+            staging=TRUE,stages=c(wake=10,light=2,deep=3,REM=5),matrixType="prop",CI.type="classic"))
+write.csv(e,"errorMatrix_WholeSample.csv",row.names=FALSE) # saving result
+```
+
+<br>
+
+## 4.2. Individual-level EBE metrics {.tabset .tabset-fade .tabset-pills}
+
+Here, we graphically inspect the distributions of individual-level sleep-stage sensitivity, specificity and accuracy, using the the *indEBE* function. We also create a new function to optimize data visualization.
+
+```{r }
+source("functions/indEBE.R")
+# function to plot EBE metrics distributions
+plotEBEdistr <- function(EBEmetric="sens"){
+  require(reshape2); require(ggplot2)
+  indEBE_melt <- melt(ind.ebe[, c("subject", colnames(ind.ebe)[grepl(EBEmetric, colnames(ind.ebe)) == TRUE])])
+  indEBE_melt$variable <- as.factor(gsub(" sens","",indEBE_melt$variable))
+  if(EBEmetric=="sens"){LAB="sensitivity (%)"} else if(EBEmetric=="spec"){LAB="specificity (%)"}else{LAB="accuracy (%)"}
+  p <- ggplot(indEBE_melt,aes(x = variable, y = value, fill = variable)) + xlab("stage") + ylab(LAB) + 
+    geom_boxplot(size=1.5, outlier.shape = NA, alpha = .5, width = .5, colour = "black") +
+    geom_point(aes(col=variable),position = position_jitter(width = .15), size = 2) + 
+    theme(legend.position = "none")
+  print(p)}
+```
+
+### HEALTHY SLEEPERS {.tabset .tabset-fade .tabset-pills}
+
+#### Sensitivity
+
+```{r out.width='60%',message=FALSE}
+# individual-level error matrices
+ind.ebe <- cbind(indEBE(data=ebe[ebe$group=="CTRL",],idCol="subject",RefCol="PSG",deviceCol="Fitbit",
+                       stage=10,stageLabel="wake",doPlot=FALSE,digits=2),
+                indEBE(data=ebe[ebe$group=="CTRL",],idCol="subject",RefCol="PSG",deviceCol="Fitbit",
+                       stage=2,stageLabel="light",doPlot=FALSE,digits=2)[,2:4],
+                indEBE(data=ebe[ebe$group=="CTRL",],idCol="subject",RefCol="PSG",deviceCol="Fitbit",
+                       stage=3,stageLabel="deep",doPlot=FALSE,digits=2)[,2:4],
+                indEBE(data=ebe[ebe$group=="CTRL",],idCol="subject",RefCol="PSG",deviceCol="Fitbit",
+                       stage=5,stageLabel="REM",doPlot=FALSE,digits=2)[,2:4])
+plotEBEdistr(EBEmetric="sens")
+```
+
+<br>
+
+#### Specificity
+
+```{r out.width='60%',message=FALSE}
+plotEBEdistr(EBEmetric="spec")
+```
+
+<br>
+
+#### Accuracy
+
+```{r out.width='60%',message=FALSE}
+plotEBEdistr(EBEmetric="acc")
+```
+
+<br>
+
+### INSOMNIA {.tabset .tabset-fade .tabset-pills}
+
+#### Sensitivity
+
+```{r out.width='60%',message=FALSE}
+# individual-level error matrices
+ind.ebe <- cbind(indEBE(data=ebe[ebe$group!="CTRL",],idCol="subject",RefCol="PSG",deviceCol="Fitbit",
+                       stage=10,stageLabel="wake",doPlot=FALSE,digits=2),
+                indEBE(data=ebe[ebe$group!="CTRL",],idCol="subject",RefCol="PSG",deviceCol="Fitbit",
+                       stage=2,stageLabel="light",doPlot=FALSE,digits=2)[,2:4],
+                indEBE(data=ebe[ebe$group!="CTRL",],idCol="subject",RefCol="PSG",deviceCol="Fitbit",
+                       stage=3,stageLabel="deep",doPlot=FALSE,digits=2)[,2:4],
+                indEBE(data=ebe[ebe$group!="CTRL",],idCol="subject",RefCol="PSG",deviceCol="Fitbit",
+                       stage=5,stageLabel="REM",doPlot=FALSE,digits=2)[,2:4])
+plotEBEdistr(EBEmetric="sens")
+```
+
+<br>
+
+#### Specificity
+
+```{r out.width='60%',message=FALSE}
+plotEBEdistr(EBEmetric="spec")
+```
+
+<br>
+
+#### Accuracy
+
+```{r out.width='60%',message=FALSE}
+plotEBEdistr(EBEmetric="acc")
+```
+
+<br>
+
+## 4.3. Group-level EBE metrics {.tabset .tabset-fade .tabset-pills}
+
+Here, we compute the group-level basic EBE metrics (i.e., accuracy, sensitivity, specificity) and advanced EBE metrics for each stage,using the the *groupEBE* function. Classical sensitivity (ability to correctly detect sleep) and specificity (ability to correctly detect wake) are also computed.
+
+```{r }
+source("functions/groupEBE.R")
+```
+
+### HEALTHY SLEEPERS
+
+```{r warning=FALSE,message=FALSE,out.width='60%'}
+rbind(groupEBE(data=ebe[ebe$group=="CTRL",],RefCol="PSG",deviceCol="Fitbit",
+               stage=10,stageLabel="wake",metricsType="avg",CI.type="classic"),
+      groupEBE(data=ebe[ebe$group=="CTRL",],RefCol="PSG",deviceCol="Fitbit",
+               stage=2,stageLabel="light",metricsType="avg",CI.type="classic"),
+      groupEBE(data=ebe[ebe$group=="CTRL",],RefCol="PSG",deviceCol="Fitbit",
+               stage=3,stageLabel="deep",metricsType="avg",CI.type="classic"),
+      groupEBE(data=ebe[ebe$group=="CTRL",],RefCol="PSG",deviceCol="Fitbit",
+               stage=5,stageLabel="REM",metricsType="avg",CI.type="classic"))
+
+# classical sensitivity and specificity
+ebe.dic <- ebe # from sleep stages to sleep/wake patterns
+ebe.dic[ebe.dic$Fitbit!=10,"Fitbit"] <- 0 
+ebe.dic[ebe.dic$PSG!=10,"PSG"] <- 0
+groupEBE(data=ebe.dic[ebe.dic$group=="CTRL",],RefCol="PSG",deviceCol="Fitbit",
+         stage=0,stageLabel="sleep",metricsType="avg")
+
+```
+
+<br>
+
+### INSOMNIA
+
+```{r warning=FALSE,message=FALSE,out.width='60%'}
+rbind(groupEBE(data=ebe[ebe$group!="CTRL",],RefCol="PSG",deviceCol="Fitbit",
+               stage=10,stageLabel="wake",metricsType="avg",CI.type="boot",boot.type="perc"),
+      groupEBE(data=ebe[ebe$group!="CTRL",],RefCol="PSG",deviceCol="Fitbit",
+               stage=2,stageLabel="light",metricsType="avg",CI.type="boot",boot.type="perc"),
+      groupEBE(data=ebe[ebe$group!="CTRL",],RefCol="PSG",deviceCol="Fitbit",
+               stage=3,stageLabel="deep",metricsType="avg",CI.type="boot",boot.type="perc"),
+      groupEBE(data=ebe[ebe$group!="CTRL",],RefCol="PSG",deviceCol="Fitbit",
+               stage=5,stageLabel="REM",metricsType="avg",CI.type="boot",boot.type="perc"))
+
+# classical sensitivity and specificity
+groupEBE(data=ebe.dic[ebe.dic$group!="CTRL",],RefCol="PSG",deviceCol="Fitbit",
+         CI.type="boot",boot.type="perc",
+         stage=10,stageLabel="wake",metricsType="avg")
+```
+
+<br>
+
+# 5. Predictors of accuracy
+
+In this section, hierarchical regression is used to explore the **factors potentially affecting the device accuracy** in the sample of healthy sleepers. 
+
+For each sleep measure (i.e., TST, SE, SOL, WASO, 'light', 'deep' and REM sleep duration) and for EBE agreement, potential predictors of discrepancies between PSG and Fitbit Charge 3™ are evaluated in the following order:
+
+1. participants' sex (boys and girls)
+
+2. participants' age (years)
+
+3. participants' BMI (kg/m2)
+
+4. firmware version (1.49.45, 1.60.39, 1.63.5)
+
+5. time of data collection (number of days since the first day of recording)
+
+For each step, discrepancies between Fitbit Charge 3™ and PSG are **plotted** against potential predictors, and tested via **linear regression models**. A **model comparison** approach is used to compare each model with a null model (with discrepancies regressed only on the sample intercept and residual variance) in terms of evidence (likelihood and parsimony). This is done with the Aikake Information Criterion (AIC; the lower the better), and specifically by computing the **Aikake information criterion weights** (AICw; the higher the better). Predictors resulting as irrelevant in a given step are not included in the following one.
+
+Before proceeding with the three hierarchical steps, we generate a dataset including discrepancies and potential predictors.
+
+```{r warning=FALSE, message=FALSE}
+# used packages
+library(Rmisc); library(ggplot2); library(gridExtra); library(lme4); 
+library(car); library(influence.ME); library(MuMIn)
+
+# creating dataset to be used
+discrep <- indDiscr(data = sleep.measures, staging=TRUE)[[1]][,1:8]
+discrep <- plyr::join(discrep,demos[,c("subject","group","sex","age","BMI","firmware","date")],by="subject")
+discrep <- plyr::join(discrep,sleep.measures[,c(1,4,6,8,10,12,14,16)],by="subject")
+discrep[discrep$subject=="A007"|discrep$subject=="A034","outliers"] <- 1 # marking outliers for TST, SE & WASO
+discrep[discrep$subject!="A007"&discrep$subject!="A034","outliers"] <- 0
+discrep$sex <- as.factor(discrep$sex)
+discrep <- discrep[discrep$group=="CTRL",] # healthy sleepers only
+head(discrep,3) # showing first 3 rows
+```
+
+<br>
+
+Similarly, we generate a dataset including EBE agreement and potential predictors.
+
+```{r warning=FALSE, message=FALSE}
+# dataset for EBE agreement
+EBEagr <- plyr::join(ebe[,c("subject","Fitbit","PSG","Fitbit_HR","group")],
+                     demos[,c("subject","sex","age","BMI","firmware","date")],by="subject")
+EBEagr <- plyr::join(EBEagr,sleep.measures[,c("subject","TST_ref")])
+EBEagr[EBEagr$Fitbit==EBEagr$PSG,"agreement"] <- 1 # agreement column
+EBEagr[EBEagr$Fitbit!=EBEagr$PSG,"agreement"] <- 0
+EBEagr[EBEagr$subject=="A007"|EBEagr$subject=="A034","outliers"] <- 1 # marking outliers for TST, SE & WASO
+EBEagr[EBEagr$subject!="A007"&EBEagr$subject!="A034","outliers"] <- 0
+EBEagr <- EBEagr[EBEagr$group=="CTRL",] # healthy sleepers only
+# EBEagr[,c("Fitbit","PSG","agreement")] # sanity check
+head(EBEagr,3) # showing first 3 rows
+summary(as.factor(EBEagr$agreement)) # number of agreement and misclassification epochs
+
+# wide EBE dataset (for data visualization)
+EBEagr.wide <- summarySE(EBEagr,measurevar="agreement",groupvars="subject",na.rm=TRUE)[,c(1,3)]
+EBEagr.wide <- plyr::join(EBEagr.wide,demos[,c("subject","sex","age","BMI","firmware","date")],
+                          by="subject")
+EBEagr.wide[EBEagr.wide$subject=="A007"|EBEagr.wide$subject=="A034","outliers"] <- 1 # marking outliers
+EBEagr.wide[EBEagr.wide$subject!="A007"&EBEagr.wide$subject!="A034","outliers"] <- 0
+EBEagr.wide <- plyr::join(EBEagr.wide,sleep.measures[,c("subject","TST_ref")],by="subject")
+```
+
+<br>
+
+**Time of data collection** is expressed with 5 digits representing the number of days since 1/1/1900. We can recode date to express the number of days since the first night of PSG sleep assessment.
+
+```{r warning=FALSE}
+head(discrep$date)
+head(as.Date(discrep$date,origin="1899-12-30"))
+discrep$date <- discrep$date - min(discrep$date) # recoded as n. days since the first night
+EBEagr$date <- EBEagr$date - min(EBEagr$date)
+EBEagr.wide$date <- EBEagr.wide$date - min(EBEagr.wide$date)
+```
+
+<br>
+
+As shown by the plot below, the three **firmware versions** were clearly updated in consecutive **dates**, with some delays in some devices. To prevent the risk of multicollinearity, the two variables cannot be included as predictors in the same models. In contrast, they will be included in **two separate models**.
+
+```{r warning=FALSE}
+summary(as.factor(discrep[discrep$group=="CTRL","firmware"])) # frequency by firmware version
+ggplot(discrep[discrep$group=="CTRL",],aes(date,firmware))+geom_point(size=2) # date and firmware
+```
+
+<br>
+
+Finally, a data.frame is created to store information from model comparison to be reported in the article.
+
+```{r warning=FALSE}
+mComp <- data.frame(outcome=as.character(NA),predictor=as.character(NA),AICw=as.numeric(NA),
+                    R2=as.numeric(NA),Coeff=as.numeric(NA),SE=as.numeric(NA),tval=as.numeric(NA),
+                    Chisq=as.numeric(NA),pval=as.numeric(NA),stringsAsFactors = FALSE)
+```
+
+<br>
+
+## 5.1. Model comparison {.tabset .tabset-fade .tabset-pills}
+
+### TST
+
+```{r out='90%'}
+# plotting (marking the two outliers highlighted in section 3 for TST, SE and WASO)
+grid.arrange(ggplot(discrep,aes(age,abs(TST_diff),col=as.factor(outliers)))+geom_point(size=2)+
+               facet_wrap("sex"), # SEX and AGE
+             ggplot(discrep,aes(BMI,abs(TST_diff),col=as.factor(outliers)))+geom_point(size=2)+
+               facet_wrap("sex"),# BMI and AGE
+             ggplot(discrep,aes(firmware,abs(TST_diff),fill=firmware))+ # firmware version
+               geom_boxplot(size=1.5,alpha=.6,outlier.shape=NA)+
+               geom_point(aes(col=as.factor(outliers)),position=position_jitter(width=.15),size=2),
+             ggplot(discrep,aes(date,abs(TST_diff),col=as.factor(outliers)))+geom_point(size=2)) # date
+
+# SEX .........................................
+# A) modeling
+TST.null <- lm(abs(TST_diff)~1,data=discrep[discrep$outliers==0,]) # null model
+TST.sex <- lm(abs(TST_diff)~sex,data=discrep[discrep$outliers==0,])
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(TST.sex) # 2. no extremely influential cases are detected
+# C) model comparison 
+coeffs <- c(Coeff=NA,SE=NA,tval=NA,Chisq=NA,pval=NA)
+TST.mComp <- rbind(mComp,c(outcome="TST",predictor="intercept",AICw=NA,
+                           R2=round(summary(TST.null)$r.squared,3),coeffs),
+                   c(outcome=NA,predictor="sex",AICw=round(Weights(AIC(TST.null,TST.sex))[2],2),
+                     R2=round(summary(TST.sex)$r.squared,3),coeffs))
+TST.mComp[2:3,1:4] # null is better
+
+# AGE...........................................
+# A) modeling
+TST.age <- lm(abs(TST_diff)~age,data=discrep[discrep$outliers==0,])
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(TST.age) # 2. no extremely influential cases are detected
+# C) model comparison
+TST.mComp <- rbind(TST.mComp,c(outcome=NA,predictor="age",AICw=round(Weights(AIC(TST.null,TST.age))[2],2),
+                               R2=round(summary(TST.age)$r.squared,3),coeffs))
+TST.mComp[c(2,4),1:4] # null is better
+
+# BMI...........................................
+# A) modeling
+TST.BMI <- lm(abs(TST_diff)~BMI,data=discrep[discrep$outliers==0,])
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(TST.BMI) # 2. no extremely influential cases are detected
+# C) model comparison
+TST.mComp <- rbind(TST.mComp,c(outcome=NA,predictor="BMI",AICw=round(Weights(AIC(TST.null,TST.BMI))[2],2),
+                               R2=round(summary(TST.BMI)$r.squared,3),coeffs))
+TST.mComp[c(2,5),1:4] # model with BMI is better
+
+# firmware.......................................
+# A) modeling
+TST.firmware <- lm(abs(TST_diff)~firmware,data=discrep[discrep$outliers==0,])
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(TST.firmware) # 2. no extremely influential cases are detected
+# C) model comparison
+TST.mComp <- rbind(TST.mComp,c(outcome=NA,predictor="Firmware",AICw=round(Weights(AIC(TST.null,TST.firmware))[2],2),
+                               R2=round(summary(TST.firmware)$r.squared,3),coeffs))
+TST.mComp[c(2,6),1:4] # null is better
+
+# date.......................................
+# A) modeling
+TST.date <- lm(abs(TST_diff)~date,data=discrep[discrep$outliers==0,])
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(TST.date) # 2. no extremely influential cases are detected
+# C) model comparison
+TST.mComp <- rbind(TST.mComp,c(outcome=NA,predictor="Date",AICw=round(Weights(AIC(TST.null,TST.date))[2],2),
+                               R2=round(summary(TST.date)$r.squared,3),coeffs))
+TST.mComp[c(2,7),1:4] # null is better
+
+# parameter estimation and final output table (only BMI selected)
+TST.mComp[2,c(5:7,9)] <- round(summary(TST.BMI)$coefficients[1,],3)
+TST.mComp[5,c(5:7,9)] <- round(summary(TST.BMI)$coefficients[2,],3)
+(TST.mComp <- TST.mComp[2:nrow(TST.mComp),])
+```
+
+<br>
+
+*Comments:*
+
+- The visual inspection shows only a slight positive tendency of TST discrepancies over **age** in the group of males, whereas neither differences between sexes nor trends over BMI emerge. The visual inspection does not reveal any evident difference between firmware versions or over the date of data collection. The **two outliers** are excluded from the analysis, since they might probably influence the results.
+
+- The only model showing a stronger evidence (higher AICw) than the null model is that including **BMI**.
+
+- However, the parameter estimated for the effect of BMI is **not significant**.
+
+<br>
+
+### SE
+
+```{r out.width='90%'}
+# plotting (marking the two outliers highlighted in section 3 for TST, SE and WASO)
+grid.arrange(ggplot(discrep,aes(age,abs(SE_diff),col=as.factor(outliers)))+geom_point(size=2)+
+               facet_wrap("sex"), # SEX and AGE
+             ggplot(discrep,aes(BMI,abs(SE_diff),col=as.factor(outliers)))+geom_point(size=2)+
+               facet_wrap("sex"),# BMI and AGE
+             ggplot(discrep,aes(firmware,abs(SE_diff),fill=firmware))+ # firmware version
+               geom_boxplot(size=1.5,alpha=.6,outlier.shape=NA)+
+               geom_point(aes(col=as.factor(outliers)),position=position_jitter(width=.15),size=2),
+             ggplot(discrep,aes(date,abs(SE_diff),col=as.factor(outliers)))+geom_point(size=2)) # date
+
+# SEX .........................................
+# A) modeling
+SE.null <- lm(abs(SE_diff)~1,data=discrep[discrep$outliers==0,]) # null model
+SE.sex <- lm(abs(SE_diff)~sex,data=discrep[discrep$outliers==0,])
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(SE.sex) # 2. no extremely influential cases are detected
+# C) model comparison 
+SE.mComp <- rbind(mComp,c(outcome="SE",predictor="intercept",AICw=NA,
+                           R2=round(summary(SE.null)$r.squared,3),coeffs),
+                   c(outcome=NA,predictor="sex",AICw=round(Weights(AIC(SE.null,SE.sex))[2],2),
+                     R2=round(summary(SE.sex)$r.squared,3),coeffs))
+SE.mComp[2:3,1:4] # null is better
+
+# AGE...........................................
+# A) modeling
+SE.age <- lm(abs(SE_diff)~age,data=discrep[discrep$outliers==0,])
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(SE.age) # 2. no extremely influential cases are detected
+# C) model comparison
+SE.mComp <- rbind(SE.mComp,c(outcome=NA,predictor="age",AICw=round(Weights(AIC(SE.null,SE.age))[2],2),
+                               R2=round(summary(SE.age)$r.squared,3),coeffs))
+SE.mComp[c(2,4),1:4] # null is better
+
+# BMI...........................................
+# A) modeling
+SE.BMI <- lm(abs(SE_diff)~BMI,data=discrep[discrep$outliers==0,])
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(SE.BMI) # 2. no extremely influential cases are detected
+# C) model comparison
+SE.mComp <- rbind(SE.mComp,c(outcome=NA,predictor="BMI",AICw=round(Weights(AIC(SE.null,SE.BMI))[2],2),
+                               R2=round(summary(SE.BMI)$r.squared,3),coeffs))
+SE.mComp[c(2,5),1:4] # model with BMI is better
+
+# firmware.......................................
+# A) modeling
+SE.firmware <- lm(abs(SE_diff)~firmware,data=discrep[discrep$outliers==0,])
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(SE.firmware) # 2. no extremely influential cases are detected
+# C) model comparison
+SE.mComp <- rbind(SE.mComp,c(outcome=NA,predictor="Firmware",AICw=round(Weights(AIC(SE.null,SE.firmware))[2],2),
+                               R2=round(summary(SE.firmware)$r.squared,3),coeffs))
+SE.mComp[c(2,6),1:4] # null is better
+
+# date.......................................
+# A) modeling
+SE.date <- lm(abs(SE_diff)~date,data=discrep[discrep$outliers==0,])
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(SE.date) # 2. no extremely influential cases are detected
+# C) model comparison
+SE.mComp <- rbind(SE.mComp,c(outcome=NA,predictor="Date",AICw=round(Weights(AIC(SE.null,SE.date))[2],2),
+                               R2=round(summary(SE.date)$r.squared,3),coeffs))
+SE.mComp[c(2,7),1:4] # null is better
+
+# parameter estimation and final output table (null is the best one)
+SE.mComp[2,c(5:7,9)] <- round(summary(SE.null)$coefficients[1,],3)
+(SE.mComp <- SE.mComp[2:nrow(SE.mComp),])
+```
+
+<br>
+
+*Comments:*
+
+- The visual inspection shows only a slight positive tendency of SE discrepancies over **age** in the group of males, whereas neither differences between sexes nor trends over BMI emerge. The visual inspection does not reveal any evident difference between firmware versions or over the date of data collection. The **two outliers** are excluded from the analysis, since they might probably influence the results.
+
+- **None** of the specified regression models show stronger evidence (higher AICw) compared to the null model.
+
+<br>
+
+### SOL {.tabset .tabset-fade .tabset-pills}
+
+#### ALL PARTICIPANTS
+
+```{r out.width='90%'}
+# plotting (marking the two outliers highlighted in section 3 for TST, SE and WASO)
+grid.arrange(ggplot(discrep,aes(age,abs(SOL_diff),col=as.factor(outliers)))+geom_point(size=2)+
+               facet_wrap("sex"), # SEX and AGE
+             ggplot(discrep,aes(BMI,abs(SOL_diff),col=as.factor(outliers)))+geom_point(size=2)+
+               facet_wrap("sex"),# BMI and AGE
+             ggplot(discrep,aes(firmware,abs(SOL_diff),fill=firmware))+ # firmware version
+               geom_boxplot(size=1.5,alpha=.6,outlier.shape=NA)+
+               geom_point(aes(col=as.factor(outliers)),position=position_jitter(width=.15),size=2),
+             ggplot(discrep,aes(date,abs(SOL_diff),col=as.factor(outliers)))+geom_point(size=2)) # date
+
+# SEX .........................................
+# A) modeling
+SOL.null <- lm(abs(SOL_diff)~1,data=discrep) # null model
+SOL.sex <- lm(abs(SOL_diff)~sex,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(SOL.sex) # 2. participant 17 (A025) might be infuential
+# C) model comparison 
+SOL.mComp <- rbind(mComp,c(outcome="SOL",predictor="intercept",AICw=NA,
+                           R2=round(summary(SOL.null)$r.squared,3),coeffs),
+                   c(outcome=NA,predictor="sex",AICw=round(Weights(AIC(SOL.null,SOL.sex))[2],2),
+                     R2=round(summary(SOL.sex)$r.squared,3),coeffs))
+SOL.mComp[2:3,1:4] # null is better
+
+# AGE...........................................
+# A) modeling
+SOL.age <- lm(abs(SOL_diff)~age,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(SOL.age) # 2. participant 17 (A025) might be infuential
+# C) model comparison
+SOL.mComp <- rbind(SOL.mComp,c(outcome=NA,predictor="age",AICw=round(Weights(AIC(SOL.null,SOL.age))[2],2),
+                               R2=round(summary(SOL.age)$r.squared,3),coeffs))
+SOL.mComp[c(2,4),1:4] # null is better
+
+# BMI...........................................
+# A) modeling
+SOL.BMI <- lm(abs(SOL_diff)~BMI,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(SOL.BMI) # 2. participant 17 (A025) might be infuential
+# C) model comparison
+SOL.mComp <- rbind(SOL.mComp,c(outcome=NA,predictor="BMI",AICw=round(Weights(AIC(SOL.null,SOL.BMI))[2],2),
+                               R2=round(summary(SOL.BMI)$r.squared,3),coeffs))
+SOL.mComp[c(2,5),1:4] # model with BMI is better
+
+# firmware.......................................
+# A) modeling
+SOL.firmware <- lm(abs(SOL_diff)~firmware,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(SOL.firmware) # 2. participant 17 (A025) might be infuential
+# C) model comparison
+SOL.mComp <- rbind(SOL.mComp,c(outcome=NA,predictor="Firmware",AICw=round(Weights(AIC(SOL.null,SOL.firmware))[2],2),
+                               R2=round(summary(SOL.firmware)$r.squared,3),coeffs))
+SOL.mComp[c(2,6),1:4] # null is better
+
+# date.......................................
+# A) modeling
+SOL.date <- lm(abs(SOL_diff)~date,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(SOL.date) # # 2. participant 17 (A025) might be infuential
+# C) model comparison
+SOL.mComp <- rbind(SOL.mComp,c(outcome=NA,predictor="Date",AICw=round(Weights(AIC(SOL.null,SOL.date))[2],2),
+                               R2=round(summary(SOL.date)$r.squared,3),coeffs))
+SOL.mComp[c(2,7),1:4] # null is better
+
+# parameter estimation and final output table (null is the best one)
+SOL.mComp[2,c(5:7,9)] <- round(summary(SOL.null)$coefficients[1,],3)
+(SOL.mComp <- SOL.mComp[2:nrow(SOL.mComp),])
+```
+
+<br>
+
+*Comments:*
+
+- The visual inspection does not show neither particular trends of SOL discrepancies over age or BMI nor evident differences between sexes .The visual inspection does not reveal any evident difference between firmware versions or over the date of data collection. **One outlier** (A025) with a SOL discrepancy higher than 15min is highlighted.
+
+- **None** of the specified regression models show stronger evidence (lower AIC and higher AICw) compared to the null model.
+
+<br>
+
+#### Excluding A025
+
+To ascertain that these results are not due to the outlier, the analysis is **replicated by excluding** this participant.
+
+```{r out.width='90%'}
+cbind(discrep[abs(discrep$SOL_diff)>15,c("subject","SOL_ref")],
+      AbsDiff=abs(discrep[abs(discrep$SOL_diff)>15,"SOL_diff"]),
+      MEAN_plus2SD=round(mean(abs(discrep$SOL_diff))+2*sd(abs(discrep$SOL_diff)),2))
+
+# sex
+SOL.null.out <- lm(abs(SOL_diff)~1,data=discrep[discrep$subject!="A025",])
+SOL.sex.out <- lm(abs(SOL_diff)~sex,data=discrep[discrep$subject!="A025",])
+par(mfrow=c(2,2)); plot(SOL.sex.out) # model assumptions
+Weights(AIC(SOL.null.out,SOL.sex.out))[2] # null is still the best
+
+# age
+SOL.age.out <- lm(abs(SOL_diff)~age,data=discrep[discrep$subject!="A025",])
+par(mfrow=c(2,2)); plot(SOL.age.out) # model assumptions
+Weights(AIC(SOL.null.out,SOL.age.out))[2] # null is still the best
+
+# BMI
+SOL.BMI.out <- lm(abs(SOL_diff)~BMI,data=discrep[discrep$subject!="A025",])
+par(mfrow=c(2,2)); plot(SOL.BMI.out) # model assumptions
+Weights(AIC(SOL.null.out,SOL.BMI.out))[2] # null is still the best
+
+# firmware
+SOL.firmware.out <- lm(abs(SOL_diff)~firmware,data=discrep[discrep$subject!="A025",])
+par(mfrow=c(2,2)); plot(SOL.firmware.out) # model assumptions
+Weights(AIC(SOL.null.out,SOL.firmware.out))[2] # null is still the best
+
+# date
+SOL.date.out <- lm(abs(SOL_diff)~date,data=discrep[discrep$subject!="A025",])
+par(mfrow=c(2,2)); plot(SOL.date.out) # model assumptions
+Weights(AIC(SOL.null.out,SOL.date.out))[2] # null is still the best
+```
+
+<br>
+
+*Comments:*
+
+- Results are almost uneffected by the removal of outlier. The null model remains the best model.
+
+<br>
+
+### WASO
+
+```{r out.width='90%'}
+# plotting (marking the two outliers highlighted in section 3 for WASO, SE and WASO)
+grid.arrange(ggplot(discrep,aes(age,abs(WASO_diff),col=as.factor(outliers)))+geom_point(size=2)+
+               facet_wrap("sex"), # SEX and AGE
+             ggplot(discrep,aes(BMI,abs(WASO_diff),col=as.factor(outliers)))+geom_point(size=2)+
+               facet_wrap("sex"),# BMI and AGE
+             ggplot(discrep,aes(firmware,abs(WASO_diff),fill=firmware))+ # firmware version
+               geom_boxplot(size=1.5,alpha=.6,outlier.shape=NA)+
+               geom_point(aes(col=as.factor(outliers)),position=position_jitter(width=.15),size=2),
+             ggplot(discrep,aes(date,abs(WASO_diff),col=as.factor(outliers)))+geom_point(size=2)) # date
+
+# SEX .........................................
+# A) modeling
+WASO.null <- lm(abs(WASO_diff)~1,data=discrep[discrep$outliers==0,]) # null model
+WASO.sex <- lm(abs(WASO_diff)~sex,data=discrep[discrep$outliers==0,])
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(WASO.sex) # 2. no extremely influential cases are detected
+# C) model comparison 
+WASO.mComp <- rbind(mComp,c(outcome="WASO",predictor="intercept",AICw=NA,
+                           R2=round(summary(WASO.null)$r.squared,3),coeffs),
+                   c(outcome=NA,predictor="sex",AICw=round(Weights(AIC(WASO.null,WASO.sex))[2],2),
+                     R2=round(summary(WASO.sex)$r.squared,3),coeffs))
+WASO.mComp[2:3,1:4] # null is better
+
+# AGE...........................................
+# A) modeling
+WASO.age <- lm(abs(WASO_diff)~age,data=discrep[discrep$outliers==0,])
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(WASO.age) # 2. no extremely influential cases are detected
+# C) model comparison
+WASO.mComp <- rbind(WASO.mComp,c(outcome=NA,predictor="age",AICw=round(Weights(AIC(WASO.null,WASO.age))[2],2),
+                               R2=round(summary(WASO.age)$r.squared,3),coeffs))
+WASO.mComp[c(2,4),1:4] # null is better
+
+# BMI...........................................
+# A) modeling
+WASO.BMI <- lm(abs(WASO_diff)~BMI,data=discrep[discrep$outliers==0,])
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(WASO.BMI) # 2. no extremely influential cases are detected
+# C) model comparison
+WASO.mComp <- rbind(WASO.mComp,c(outcome=NA,predictor="BMI",AICw=round(Weights(AIC(WASO.null,WASO.BMI))[2],2),
+                               R2=round(summary(WASO.BMI)$r.squared,3),coeffs))
+WASO.mComp[c(2,5),1:4] # model with BMI is better
+
+# firmware.......................................
+# A) modeling
+WASO.firmware <- lm(abs(WASO_diff)~firmware,data=discrep[discrep$outliers==0,])
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(WASO.firmware) # 2. no extremely influential cases are detected
+# C) model comparison
+WASO.mComp <- rbind(WASO.mComp,c(outcome=NA,predictor="Firmware",AICw=round(Weights(AIC(WASO.null,WASO.firmware))[2],2),
+                               R2=round(summary(WASO.firmware)$r.squared,3),coeffs))
+WASO.mComp[c(2,6),1:4] # null is better
+
+# date.......................................
+# A) modeling
+WASO.date <- lm(abs(WASO_diff)~date,data=discrep[discrep$outliers==0,])
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(WASO.date) # 2. no extremely influential cases are detected
+# C) model comparison
+WASO.mComp <- rbind(WASO.mComp,c(outcome=NA,predictor="Date",AICw=round(Weights(AIC(WASO.null,WASO.date))[2],2),
+                               R2=round(summary(WASO.date)$r.squared,3),coeffs))
+WASO.mComp[c(2,7),1:4] # null is better
+
+# parameter estimation and final output table (only BMI selected)
+WASO.mComp[2,c(5:7,9)] <- round(summary(WASO.BMI)$coefficients[1,],3)
+WASO.mComp[5,c(5:7,9)] <- round(summary(WASO.BMI)$coefficients[2,],3)
+(WASO.mComp <- WASO.mComp[2:nrow(WASO.mComp),])
+```
+
+<br>
+
+*Comments:*
+
+- The visual inspection shows only a slight positive trend over **BMI**, whereas no evident trends are highligted over age, and no evident differences are highlighted between sexes. The visual inspection does not reveal any evident difference between firmware versions or over the date of data collection. The **two outliers** are excluded from the analysis, since they might probably influence the results.
+
+- The only model showing a stronger evidence (higher AICw) than the null model is that including **BMI**.
+
+- In this case, the parameter estimated for the effect of BMI is **significant**.
+
+<br>
+
+### Light
+
+```{r out.width='90%'}
+# plotting (marking the two outliers highlighted in section 3 for TST, SE and WASO)
+grid.arrange(ggplot(discrep,aes(age,abs(Light_diff),col=as.factor(outliers)))+geom_point(size=2)+
+               facet_wrap("sex"), # SEX and AGE
+             ggplot(discrep,aes(BMI,abs(Light_diff),col=as.factor(outliers)))+geom_point(size=2)+
+               facet_wrap("sex"),# BMI and AGE
+             ggplot(discrep,aes(firmware,abs(Light_diff),fill=firmware))+ # firmware version
+               geom_boxplot(size=1.5,alpha=.6,outlier.shape=NA)+
+               geom_point(aes(col=as.factor(outliers)),position=position_jitter(width=.15),size=2),
+             ggplot(discrep,aes(date,abs(Light_diff),col=as.factor(outliers)))+geom_point(size=2)) # date
+
+# SEX .........................................
+# A) modeling
+Light.null <- lm(abs(Light_diff)~1,data=discrep) # null model
+Light.sex <- lm(abs(Light_diff)~sex,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(Light.sex) # 2. no extremely influential cases are detected
+# C) model comparison 
+Light.mComp <- rbind(mComp,c(outcome="Light",predictor="intercept",AICw=NA,
+                           R2=round(summary(Light.null)$r.squared,3),coeffs),
+                   c(outcome=NA,predictor="sex",AICw=round(Weights(AIC(Light.null,Light.sex))[2],2),
+                     R2=round(summary(Light.sex)$r.squared,3),coeffs))
+Light.mComp[2:3,1:4] # null is better
+
+# AGE...........................................
+# A) modeling
+Light.age <- lm(abs(Light_diff)~age,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(Light.age) # 2. no extremely influential cases are detected
+# C) model comparison
+Light.mComp <- rbind(Light.mComp,c(outcome=NA,predictor="age",AICw=round(Weights(AIC(Light.null,Light.age))[2],2),
+                               R2=round(summary(Light.age)$r.squared,3),coeffs))
+Light.mComp[c(2,4),1:4] # null is better
+
+# BMI...........................................
+# A) modeling
+Light.BMI <- lm(abs(Light_diff)~BMI,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(Light.BMI) # 2. no extremely influential cases are detected
+# C) model comparison
+Light.mComp <- rbind(Light.mComp,c(outcome=NA,predictor="BMI",AICw=round(Weights(AIC(Light.null,Light.BMI))[2],2),
+                               R2=round(summary(Light.BMI)$r.squared,3),coeffs))
+Light.mComp[c(2,5),1:4] # model with BMI is better
+
+# firmware.......................................
+# A) modeling
+Light.firmware <- lm(abs(Light_diff)~firmware,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(Light.firmware) # 2. no extremely influential cases are detected
+# C) model comparison
+Light.mComp <- rbind(Light.mComp,c(outcome=NA,predictor="Firmware",AICw=round(Weights(AIC(Light.null,Light.firmware))[2],2),
+                               R2=round(summary(Light.firmware)$r.squared,3),coeffs))
+Light.mComp[c(2,6),1:4] # null is better
+
+# date.......................................
+# A) modeling
+Light.date <- lm(abs(Light_diff)~date,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(Light.date) # 2. no extremely influential cases are detected
+# C) model comparison
+Light.mComp <- rbind(Light.mComp,c(outcome=NA,predictor="Date",AICw=round(Weights(AIC(Light.null,Light.date))[2],2),
+                               R2=round(summary(Light.date)$r.squared,3),coeffs))
+Light.mComp[c(2,7),1:4] # null is better
+
+# final output table (null is the best one)
+Light.mComp[2,c(5:7,9)] <- round(summary(Light.null)$coefficients[1,],3)
+(Light.mComp <- Light.mComp[2:nrow(Light.mComp),])
+```
+
+<br>
+
+*Comments:*
+
+- The visual inspection of demographic variables shows only a slight positive tendency of discrepancies in 'light sleep' duration over **age**, especially in the group of males, whereas neither differences between sexes nor trends over BMI emerge. The visual inspection does not reveal any evident difference between firmware versions or over the date of data collection.
+
+- **None** of the specified regression models show stronger evidence (lower AIC and higher AICw) compared to the null model.
+
+<br>
+
+### Deep
+
+```{r out.width='90%'}
+# plotting (marking the two outliers highlighted in section 3 for TST, SE and WASO)
+grid.arrange(ggplot(discrep,aes(age,abs(Deep_diff),col=as.factor(outliers)))+geom_point(size=2)+
+               facet_wrap("sex"), # SEX and AGE
+             ggplot(discrep,aes(BMI,abs(Deep_diff),col=as.factor(outliers)))+geom_point(size=2)+
+               facet_wrap("sex"),# BMI and AGE
+             ggplot(discrep,aes(firmware,abs(Deep_diff),fill=firmware))+ # firmware version
+               geom_boxplot(size=1.5,alpha=.6,outlier.shape=NA)+
+               geom_point(aes(col=as.factor(outliers)),position=position_jitter(width=.15),size=2),
+             ggplot(discrep,aes(date,abs(Deep_diff),col=as.factor(outliers)))+geom_point(size=2)) # date
+
+# SEX .........................................
+# A) modeling
+Deep.null <- lm(abs(Deep_diff)~1,data=discrep) # null model
+Deep.sex <- lm(abs(Deep_diff)~sex,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(Deep.sex) # 2. no extremely influential cases are detected
+# C) model comparison 
+Deep.mComp <- rbind(mComp,c(outcome="Deep",predictor="intercept",AICw=NA,
+                           R2=round(summary(Deep.null)$r.squared,3),coeffs),
+                   c(outcome=NA,predictor="sex",AICw=round(Weights(AIC(Deep.null,Deep.sex))[2],2),
+                     R2=round(summary(Deep.sex)$r.squared,3),coeffs))
+Deep.mComp[2:3,1:4] # null is better
+
+# AGE...........................................
+# A) modeling
+Deep.age <- lm(abs(Deep_diff)~age,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(Deep.age) # 2. no extremely influential cases are detected
+# C) model comparison
+Deep.mComp <- rbind(Deep.mComp,c(outcome=NA,predictor="age",AICw=round(Weights(AIC(Deep.null,Deep.age))[2],2),
+                               R2=round(summary(Deep.age)$r.squared,3),coeffs))
+Deep.mComp[c(2,4),1:4] # null is better
+
+# BMI...........................................
+# A) modeling
+Deep.BMI <- lm(abs(Deep_diff)~BMI,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(Deep.BMI) # 2. no extremely influential cases are detected
+# C) model comparison
+Deep.mComp <- rbind(Deep.mComp,c(outcome=NA,predictor="BMI",AICw=round(Weights(AIC(Deep.null,Deep.BMI))[2],2),
+                               R2=round(summary(Deep.BMI)$r.squared,3),coeffs))
+Deep.mComp[c(2,5),1:4] # model with BMI is better
+
+# firmware.......................................
+# A) modeling
+Deep.firmware <- lm(abs(Deep_diff)~firmware,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(Deep.firmware) # 2. no extremely influential cases are detected
+# C) model comparison
+Deep.mComp <- rbind(Deep.mComp,c(outcome=NA,predictor="Firmware",
+                                 AICw=round(Weights(AIC(Deep.null,Deep.firmware))[2],2),
+                               R2=round(summary(Deep.firmware)$r.squared,3),coeffs))
+Deep.mComp[c(2,6),1:4] # null is better
+
+# date.......................................
+# A) modeling
+Deep.date <- lm(abs(Deep_diff)~date,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(Deep.date) # 2. no extremely influential cases are detected
+# C) model comparison
+Deep.mComp <- rbind(Deep.mComp,c(outcome=NA,predictor="Date",AICw=round(Weights(AIC(Deep.null,Deep.date))[2],2),
+                               R2=round(summary(Deep.date)$r.squared,3),coeffs))
+Deep.mComp[c(2,7),1:4] # null is better
+
+# final output table (null is the best one)
+Deep.mComp[2,c(5:7,9)] <- round(summary(Deep.null)$coefficients[1,],3)
+(Deep.mComp <- Deep.mComp[2:nrow(Deep.mComp),])
+```
+
+<br>
+
+*Comments:*
+
+- The visual inspection of discrepancies in 'deep sleep' duration shows a clear positive trend over PSG-derived 'deep sleep' duration (propotional bias). The visual inspection of demographic variables shows only a slight positive tendency of discrepancies in 'deep sleep' duration over **age**, especially in the group of males, whereas neither differences between sexes nor trends over BMI emerge.
+
+- **None** of the specified regression models show stronger evidence (lower AIC and higher AICw) compared to the null model.
+
+<br>
+
+### REM
+
+```{r out.width='90%'}
+# plotting (marking the two outliers highlighted in section 3 for TST, SE and WASO)
+grid.arrange(ggplot(discrep,aes(age,abs(REM_diff),col=as.factor(outliers)))+geom_point(size=2)+
+               facet_wrap("sex"), # SEX and AGE
+             ggplot(discrep,aes(BMI,abs(REM_diff),col=as.factor(outliers)))+geom_point(size=2)+
+               facet_wrap("sex"),# BMI and AGE
+             ggplot(discrep,aes(firmware,abs(REM_diff),fill=firmware))+ # firmware version
+               geom_boxplot(size=1.5,alpha=.6,outlier.shape=NA)+
+               geom_point(aes(col=as.factor(outliers)),position=position_jitter(width=.15),size=2),
+             ggplot(discrep,aes(date,abs(REM_diff),col=as.factor(outliers)))+geom_point(size=2)) # date
+
+# SEX .........................................
+# A) modeling
+REM.null <- lm(abs(REM_diff)~1,data=discrep)
+REM.sex <- lm(abs(REM_diff)~sex,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(REM.sex) # 2. no extremely influential cases are detected
+# C) model comparison 
+REM.mComp <- rbind(mComp,c(outcome="REM",predictor="intercept",AICw=NA,
+                           R2=round(summary(REM.null)$r.squared,3),coeffs),
+                   c(outcome=NA,predictor="sex",AICw=round(Weights(AIC(REM.null,REM.sex))[2],2),
+                     R2=round(summary(REM.sex)$r.squared,3),coeffs))
+REM.mComp[2:3,1:4] # trueS is better
+
+# AGE...........................................
+# A) modeling
+REM.age <- lm(abs(REM_diff)~age,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(REM.age) # 2. no extremely influential cases are detected
+# C) model comparison
+REM.mComp <- rbind(REM.mComp,c(outcome=NA,predictor="age",AICw=round(Weights(AIC(REM.null,REM.age))[2],2),
+                               R2=round(summary(REM.age)$r.squared,3),coeffs))
+REM.mComp[c(2,4),1:4] # null is better
+
+# BMI...........................................
+# A) modeling
+REM.BMI <- lm(abs(REM_diff)~BMI,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(REM.BMI) # 2. no extremely influential cases are detected
+# C) model comparison
+REM.mComp <- rbind(REM.mComp,c(outcome=NA,predictor="BMI",AICw=round(Weights(AIC(REM.null,REM.BMI))[2],2),
+                               R2=round(summary(REM.BMI)$r.squared,3),coeffs))
+REM.mComp[c(2,5),1:4] # model with BMI is better
+
+# firmware.......................................
+# A) modeling
+REM.firmware <- lm(abs(REM_diff)~firmware,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(REM.firmware) # 2. no extremely influential cases are detected
+# C) model comparison
+REM.mComp <- rbind(REM.mComp,c(outcome=NA,predictor="Firmware",AICw=round(Weights(AIC(REM.null,REM.firmware))[2],2),
+                               R2=round(summary(REM.firmware)$r.squared,3),coeffs))
+REM.mComp[c(2,6),1:4] # null is better
+
+# date.......................................
+# A) modeling
+REM.date <- lm(abs(REM_diff)~date,data=discrep)
+# B) linear regression assumptions # 1. residuals are normally distributed and independent to fitted values
+par(mfrow=c(2,2)); plot(REM.date) # 2. no extremely influential cases are detected
+# C) model comparison
+REM.mComp <- rbind(REM.mComp,c(outcome=NA,predictor="Date",AICw=round(Weights(AIC(REM.null,REM.date))[2],2),
+                               R2=round(summary(REM.date)$r.squared,3),coeffs))
+REM.mComp[c(2,7),1:4] # null is better
+
+# parameter estimation and final output table (only trueS selected)
+REM.mComp[2,c(5:7,9)] <- round(summary(REM.null)$coefficients[1,],3)
+(REM.mComp <- REM.mComp[2:nrow(REM.mComp),])
+```
+
+<br>
+
+*Comments:*
+
+- The visual inspection shows positive trend of discrepancies in REM sleep duration over **PSG REM sleep** duration. The visual inspection does not show neither particular trends of discrepancies in REM sleep duration over age or BMI nor evident differences between sexes. Any evident difference between firmware versions or over the date of data collection is highlighted.
+
+- **None** of the specified regression models show stronger evidence (lower AIC and higher AICw) compared to the null model.
+
+<br>
+
+### EBE agreement{.tabset .tabset-fade .tabset-pills}
+
+#### ALL PARTICIPANTS
+
+```{r out.width='80%'}
+# plotting (marking the two outliers highlighted in section 3 for TST, SE and WASO)
+grid.arrange(ggplot(EBEagr.wide,aes(age,agreement,col=as.factor(outliers)))+geom_point(size=2)+
+               facet_wrap("sex"), # SEX and AGE
+             ggplot(EBEagr.wide,aes(BMI,agreement,col=as.factor(outliers)))+geom_point(size=2)+
+               facet_wrap("sex"),# BMI and AGE
+             ggplot(EBEagr.wide,aes(firmware,agreement,fill=firmware))+ # firmware version
+               geom_boxplot(size=1.5,alpha=.6,outlier.shape=NA)+
+               geom_point(aes(col=as.factor(outliers)),position=position_jitter(width=.15),size=2),
+             ggplot(EBEagr.wide,aes(date,agreement,col=as.factor(outliers)))+geom_point(size=2)) # date
+
+# SEX .........................................
+# A) modeling (nAGQ = 0 to avoid Laplace approximation and reach convergence)
+EBEagr.null <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr)
+EBEagr.sex <- glmer(agreement~sex+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr)
+# B) mixed-effects logistic regression assumptions 
+EBEagr$probabilities <- predict(EBEagr.sex, type = "response") # Predict the probability (p) of agreement
+EBEagr$logit <- log(EBEagr$probabilities/(1-EBEagr$probabilities)) # from probability to logit
+EBEagr.wide2 <- plyr::join(EBEagr.wide,EBEagr[,c("subject","logit")],by="subject",match="first")
+gridExtra::grid.arrange(ggplot(EBEagr.wide2, aes(logit,age))+geom_point(size=2)+
+                          geom_smooth(method="loess",span=2)+
+                          ggtitle("Linearity AGE"), # 1. linear rel. between continuous predictors & logit
+                        ggplot(EBEagr.wide2, aes(logit,BMI))+geom_point(size=2)+
+                          geom_smooth(method="loess",span=2)+
+                          ggtitle("Linearity BMI"),
+                        lattice::dotplot(ranef(EBEagr.sex))[[1]], # 2. random effects centered to zero,
+                        plot(ranef(EBEagr.sex),main="Random Effects QQplot")[[1]], # and normally distributed
+                        nrow=2)
+plot(influence(EBEagr.sex,"subject"),which="cook", # influential cases (Cook's distance) 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+# C) model comparison 
+EBEagr.mComp <- rbind(mComp,c(outcome="EBEagr",predictor="intercept",AICw=NA,
+                              R2=round(r.squaredGLMM(EBEagr.null)[1,1],3),coeffs),
+                   c(outcome=NA,predictor="sex",AICw=round(Weights(AIC(EBEagr.null,EBEagr.sex)),2)[2],
+                     R2=round(r.squaredGLMM(EBEagr.sex)[1,1],3),coeffs))
+EBEagr.mComp[2:3,1:4] # null is better
+
+# age .........................................
+# A) modeling (nAGQ = 0 to avoid Laplace approximation and reach convergence)
+EBEagr.age <- glmer(agreement~age+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr)
+# B) mixed-effects logistic regression assumptions 
+EBEagr$probabilities <- predict(EBEagr.age, type = "response") # Predict the probability (p) of agreement
+EBEagr$logit <- log(EBEagr$probabilities/(1-EBEagr$probabilities)) # from probability to logit
+EBEagr.wide2 <- plyr::join(EBEagr.wide,EBEagr[,c("subject","logit")],by="subject",match="first")
+gridExtra::grid.arrange(ggplot(EBEagr.wide2, aes(logit,age))+geom_point(size=2)+
+                          geom_smooth(method="loess",span=2)+
+                          ggtitle("Linearity AGE"), # 1. linear rel. between continuous predictors & logit
+                        ggplot(EBEagr.wide2, aes(logit,BMI))+geom_point(size=2)+
+                          geom_smooth(method="loess",span=2)+
+                          ggtitle("Linearity BMI"),
+                        lattice::dotplot(ranef(EBEagr.age))[[1]], # 2. random effects centered to zero,
+                        plot(ranef(EBEagr.age),main="Random Effects QQplot")[[1]], # and normally distributed
+                        nrow=2)
+plot(influence(EBEagr.age,"subject"),which="cook", # influential cases (Cook's distance) 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+# C) model comparison 
+EBEagr.mComp <- rbind(EBEagr.mComp,c(outcome=NA,predictor="age",
+                                     AICw=round(Weights(AIC(EBEagr.null,EBEagr.age)),2)[2],
+                                     R2=round(r.squaredGLMM(EBEagr.age)[1,1],3),coeffs))
+EBEagr.mComp[c(2,4),1:4] # null is better
+
+# BMI .........................................
+# A) modeling (nAGQ = 0 to avoid Laplace approximation and reach convergence)
+EBEagr.BMI <- glmer(agreement~BMI+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr)
+# B) mixed-effects logistic regression assumptions 
+EBEagr$probabilities <- predict(EBEagr.BMI, type = "response") # Predict the probability (p) of agreement
+EBEagr$logit <- log(EBEagr$probabilities/(1-EBEagr$probabilities)) # from probability to logit
+EBEagr.wide2 <- plyr::join(EBEagr.wide,EBEagr[,c("subject","logit")],by="subject",match="first")
+gridExtra::grid.arrange(ggplot(EBEagr.wide2, aes(logit,BMI))+geom_point(size=2)+
+                          geom_smooth(method="loess",span=2)+
+                          ggtitle("Linearity BMI"), # 1. linear rel. between continuous predictors & logit
+                        ggplot(EBEagr.wide2, aes(logit,BMI))+geom_point(size=2)+
+                          geom_smooth(method="loess",span=2)+
+                          ggtitle("Linearity BMI"),
+                        lattice::dotplot(ranef(EBEagr.BMI))[[1]], # 2. random effects centered to zero,
+                        plot(ranef(EBEagr.BMI),main="Random Effects QQplot")[[1]], # and normally distributed
+                        nrow=2)
+plot(influence(EBEagr.BMI,"subject"),which="cook", # influential cases (Cook's distance) 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+# C) model comparison 
+EBEagr.mComp <- rbind(EBEagr.mComp,c(outcome=NA,predictor="BMI",
+                                     AICw=round(Weights(AIC(EBEagr.null,EBEagr.BMI)),2)[2],
+                                     R2=round(r.squaredGLMM(EBEagr.BMI)[1,1],3),coeffs))
+EBEagr.mComp[c(2,5),1:4] # null is better
+
+# firmware .........................................
+# A) modeling (nAGQ = 0 to avoid Laplace approximation and reach convergence)
+EBEagr.firmware <- glmer(agreement~firmware+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr)
+# B) mixed-effects logistic regression assumptions 
+EBEagr$probabilities <- predict(EBEagr.firmware, type = "response") # Predict the probability (p) of agreement
+EBEagr$logit <- log(EBEagr$probabilities/(1-EBEagr$probabilities)) # from probability to logit
+EBEagr.wide2 <- plyr::join(EBEagr.wide,EBEagr[,c("subject","logit")],by="subject",match="first")
+gridExtra::grid.arrange(ggplot(EBEagr.wide2, aes(logit,firmware))+geom_point(size=2)+
+                          geom_smooth(method="loess",span=2)+
+                          ggtitle("Linearity firmware"), # 1. linear rel. between continuous predictors & logit
+                        ggplot(EBEagr.wide2, aes(logit,BMI))+geom_point(size=2)+
+                          geom_smooth(method="loess",span=2)+
+                          ggtitle("Linearity BMI"),
+                        lattice::dotplot(ranef(EBEagr.firmware))[[1]], # 2. random effects centered to zero,
+                        plot(ranef(EBEagr.firmware),main="Random Effects QQplot")[[1]], # and normally distributed
+                        nrow=2)
+plot(influence(EBEagr.firmware,"subject"),which="cook", # influential cases (Cook's distance) 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+# C) model comparison 
+EBEagr.mComp <- rbind(EBEagr.mComp,c(outcome=NA,predictor="firmware",
+                                     AICw=round(Weights(AIC(EBEagr.null,EBEagr.firmware)),2)[2],
+                                     R2=round(r.squaredGLMM(EBEagr.firmware)[1,1],3),coeffs))
+EBEagr.mComp[c(2,6),1:4] # null is better
+
+# date .........................................
+# A) modeling (nAGQ = 0 to avoid Laplace approximation and reach convergence)
+EBEagr.date <- glmer(agreement~date+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr)
+# B) mixed-effects logistic regression assumptions 
+EBEagr$probabilities <- predict(EBEagr.date, type = "response") # Predict the probability (p) of agreement
+EBEagr$logit <- log(EBEagr$probabilities/(1-EBEagr$probabilities)) # from probability to logit
+EBEagr.wide2 <- plyr::join(EBEagr.wide,EBEagr[,c("subject","logit")],by="subject",match="first")
+gridExtra::grid.arrange(ggplot(EBEagr.wide2, aes(logit,date))+geom_point(size=2)+
+                          geom_smooth(method="loess",span=2)+
+                          ggtitle("Linearity date"), # 1. linear rel. between continuous predictors & logit
+                        ggplot(EBEagr.wide2, aes(logit,BMI))+geom_point(size=2)+
+                          geom_smooth(method="loess",span=2)+
+                          ggtitle("Linearity BMI"),
+                        lattice::dotplot(ranef(EBEagr.date))[[1]], # 2. random effects centered to zero,
+                        plot(ranef(EBEagr.date),main="Random Effects QQplot")[[1]], # and normally distributed
+                        nrow=2)
+plot(influence(EBEagr.date,"subject"),which="cook", # influential cases (Cook's distance) 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+# C) model comparison 
+EBEagr.mComp <- rbind(EBEagr.mComp,c(outcome=NA,predictor="date",
+                                     AICw=round(Weights(AIC(EBEagr.null,EBEagr.date)),2)[2],
+                                     R2=round(r.squaredGLMM(EBEagr.date)[1,1],3),coeffs))
+EBEagr.mComp[c(2,7),1:4] # null is better
+
+# HR .........................................
+library(dplyr)
+EBEagr <- EBEagr %>%
+  group_by(subject) %>%
+  mutate(HR.mean=mean(Fitbit_HR,na.rm=TRUE))
+# A) modeling (nAGQ = 0 to avoid Laplace approximation and reach convergence)
+EBEagr.HR <- glmer(agreement~HR.mean+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr)
+# B) mixed-effects logistic regression assumptions 
+EBEagr$probabilities <- predict(EBEagr.HR, type = "response") # Predict the probability (p) of agreement
+EBEagr$logit <- log(EBEagr$probabilities/(1-EBEagr$probabilities)) # from probability to logit
+EBEagr.wide2 <- plyr::join(EBEagr.wide,EBEagr[,c("subject","logit")],by="subject",match="first")
+gridExtra::grid.arrange(ggplot(EBEagr.wide2, aes(logit,date))+geom_point(size=2)+
+                          geom_smooth(method="loess",span=2)+
+                          ggtitle("Linearity date"), # 1. linear rel. between continuous predictors & logit
+                        ggplot(EBEagr.wide2, aes(logit,BMI))+geom_point(size=2)+
+                          geom_smooth(method="loess",span=2)+
+                          ggtitle("Linearity BMI"),
+                        lattice::dotplot(ranef(EBEagr.HR))[[1]], # 2. random effects centered to zero,
+                        plot(ranef(EBEagr.HR),main="Random Effects QQplot")[[1]], # and normally distributed
+                        nrow=2)
+plot(influence(EBEagr.HR,"subject"),which="cook", # influential cases (Cook's distance) 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+# C) model comparison 
+EBEagr.mComp <- rbind(EBEagr.mComp,c(outcome=NA,predictor="HR",
+                                     AICw=round(Weights(AIC(EBEagr.null,EBEagr.HR)),2)[2],
+                                     R2=round(r.squaredGLMM(EBEagr.HR)[1,1],3),coeffs))
+EBEagr.mComp[c(2,8),1:4] # null is better
+
+# parameter estimation and final output table (null is the best one)
+EBEagr.mComp[2,c(5:7)] <- round(summary(EBEagr.null)$coefficients[1,1:3],3)
+(EBEagr.mComp <- EBEagr.mComp[2:nrow(EBEagr.mComp),])
+
+```
+
+<br>
+
+*Comments:*
+
+- The visual inspection shows a slight negative tendency of EBE agreement over **age**, and a slight positive tendency of EBE agreement over **BMI**, especially in males. No differences between sexes are highlighted. The visual inspection shows a slighlty higher agreement for **firmware** 1.63.5 (last one) compared to 1.49.45 (first one). The same trend is observed for agreement values over **date** of data collection.
+
+- Model diagnostics reveal **one influential case** (A040) for the models specified for sex, age and firmware, and **two influential cases** (A040 and A060) for BMI and date.
+
+- **None** of the specified regression models show stronger evidence (higher AICw) compared to the null model.
+
+<br>
+
+#### Excluding A040
+
+To ascertain that these results are not due to the highlighted **influential cases**, the analysis is **replicated by excluding** these two participants, starting from the most influential (A040). Note that A040 shows higher agreement compared to the rest of the sample.
+
+```{r warning=FALSE, message=FALSE}
+cbind(EBEagr.wide[EBEagr.wide$subject=="A040",c("subject","agreement")],
+      MEAN_plus2SD=round(mean(EBEagr.wide$agreement)+2*sd(EBEagr.wide$agreement),2))
+
+# excluding A040
+EBEagr_noInfl <- EBEagr[EBEagr$subject!="A040",]
+EBEagr.wide_noInfl <- EBEagr.wide[EBEagr.wide$subject!="A040",]
+
+# sex
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.sex_noInfl <- glmer(agreement~sex+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.sex_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.sex_noInfl))[2] # null is still the best
+
+# age
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.age_noInfl <- glmer(agreement~age+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.age_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.age_noInfl))[2] # null is still the best
+
+# BMI
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.BMI_noInfl <- glmer(agreement~BMI+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.BMI_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.BMI_noInfl))[2] # null is still the best
+
+# firmware
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.firmware_noInfl <- glmer(agreement~firmware+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.firmware_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.firmware_noInfl))[2] # null is still the best
+
+# date
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.date_noInfl <- glmer(agreement~date+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.date_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.date_noInfl))[2] # null is still the best
+```
+
+<br>
+
+*Comments:*
+
+- The exclusion of A040 does not change the results: the null model is always the best model.
+
+- Two further **influential cases** (A013 and A030) are detected based on the Cook's distance for the models including the effect of age, and one further **influential case** is highlighted for the models including the effect of BMI (A060) and date (A070).
+
+<br>
+
+#### Excluding also A060
+
+Next, the analysis is replicated by excluding also participant A060, which showed the highest influence on the estimated parameter (especially for BMI, and partially for date). Thus, the resulting model is specified by excluding **two participants** (A040 and A060). Note that A060 does not show extreme agreement compared to the rest of the sample.
+
+```{r warning=FALSE, message=FALSE}
+cbind(EBEagr.wide[EBEagr.wide$subject=="A060",c("subject","agreement")],
+      MEAN_minus2SD=round(mean(EBEagr.wide$agreement)-2*sd(EBEagr.wide$agreement),2))
+
+# excluding A040
+EBEagr_noInfl <- EBEagr_noInfl[EBEagr_noInfl$subject!="A060",]
+EBEagr.wide_noInfl <- EBEagr.wide_noInfl[EBEagr.wide_noInfl$subject!="A060",]
+
+# sex
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.sex_noInfl <- glmer(agreement~sex+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.sex_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.sex_noInfl))[2] # null is still the best
+
+# age
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.age_noInfl <- glmer(agreement~age+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.age_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.age_noInfl))[2] # null is still the best
+
+# BMI
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.BMI_noInfl <- glmer(agreement~BMI+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.BMI_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.BMI_noInfl))[2] # null is still the best
+
+# firmware
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.firmware_noInfl <- glmer(agreement~firmware+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.firmware_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.firmware_noInfl))[2] # firmware is better than the null
+summary(EBEagr.firmware_noInfl)$coefficients[,1:3]
+
+# date
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.date_noInfl <- glmer(agreement~date+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.date_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.date_noInfl))[2] # null is still the best
+```
+
+<br>
+
+*Comments:*
+
+- The exclusion of A060 leads to stronger evidence for the model including **firmware version** than the null model, although the estimated parameters are relatively low compared to the corresponding coefficients.
+
+- Two further **influential cases** are detected based on the Cook's distance: A013 (for age and BMI) and A070 (for firmware and date).
+
+<br>
+
+#### Excluding also A070
+
+Next, the analysis is replicated by excluding also participant A070, which showed the highest influence on the estimated parameter (especially for firmware and date). Thus, the resulting model is specified by excluding **three participants** (A040, A060 and A070). Note that A070 shows a substantially lower agreement compared to the rest of the sample.
+
+```{r warning=FALSE, message=FALSE}
+cbind(EBEagr.wide[EBEagr.wide$subject=="A070",c("subject","agreement")],
+      MEAN_minus2SD=round(mean(EBEagr.wide$agreement)-2*sd(EBEagr.wide$agreement),2))
+
+# excluding A070
+EBEagr_noInfl <- EBEagr_noInfl[EBEagr_noInfl$subject!="A070",]
+EBEagr.wide_noInfl <- EBEagr.wide_noInfl[EBEagr.wide_noInfl$subject!="A070",]
+
+# sex
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.sex_noInfl <- glmer(agreement~sex+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.sex_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.sex_noInfl))[2] # null is still the best
+summary(EBEagr.sex_noInfl)$coefficients[,1:3]
+
+# age
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.age_noInfl <- glmer(agreement~age+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.age_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.age_noInfl))[2] # null is still the best
+
+# BMI
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.BMI_noInfl <- glmer(agreement~BMI+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.BMI_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.BMI_noInfl))[2] # null is still the best
+
+# firmware
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.firmware_noInfl <- glmer(agreement~firmware+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.firmware_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.firmware_noInfl))[2] # firmware is better than the null
+summary(EBEagr.firmware_noInfl)$coefficients[,1:3]
+
+# date
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.date_noInfl <- glmer(agreement~date+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.date_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.date_noInfl))[2] # null is still the best
+summary(EBEagr.date_noInfl)$coefficients[,1:3]
+```
+
+<br>
+
+*Comments:*
+
+- The exclusion of A070 leads to stronger evidence for the models including **sex**, **firmware version** and **date** compared to the null model, although only **firmware version** (difference from first and third) and **date** show relatively large parameters.
+
+- Two further **influential cases** are detected based on the Cook's distance: A007 (for sex), A013 (for age and BMI).
+
+<br>
+
+#### Excluding also A013
+
+Next, the analysis is replicated by excluding also participant A013, which showed the highest influence on the estimated parameter (especially for age and BMI). Thus, the resulting model is specified by excluding **four participants** (A040, A060, A070 and A013). Note that A013shows a substantially lower agreement compared to the rest of the sample.
+
+```{r warning=FALSE, message=FALSE}
+cbind(EBEagr.wide[EBEagr.wide$subject=="A013",c("subject","agreement")],
+      MEAN_minus2SD=round(mean(EBEagr.wide$agreement)-2*sd(EBEagr.wide$agreement),2))
+
+# excluding A013
+EBEagr_noInfl <- EBEagr_noInfl[EBEagr_noInfl$subject!="A013",]
+EBEagr.wide_noInfl <- EBEagr.wide_noInfl[EBEagr.wide_noInfl$subject!="A013",]
+
+# sex
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.sex_noInfl <- glmer(agreement~sex+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.sex_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.sex_noInfl))[2] # null is still the best
+
+# age
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.age_noInfl <- glmer(agreement~age+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.age_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.age_noInfl))[2] # null is still the best
+summary(EBEagr.age_noInfl)$coefficients[,1:3]
+
+# BMI
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.BMI_noInfl <- glmer(agreement~BMI+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.BMI_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.BMI_noInfl))[2] # null is still the best
+summary(EBEagr.BMI_noInfl)$coefficients[,1:3]
+
+# firmware
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.firmware_noInfl <- glmer(agreement~firmware+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.firmware_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.firmware_noInfl))[2] # firmware is better than the null
+summary(EBEagr.firmware_noInfl)$coefficients[,1:3]
+
+# date
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.date_noInfl <- glmer(agreement~date+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.date_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.date_noInfl))[2] # null is still the best
+summary(EBEagr.date_noInfl)$coefficients[,1:3]
+```
+
+<br>
+
+*Comments:*
+
+- The exclusion of A013 leads to stronger evdidence for the models including **age**, **BMI**, **firmware** and **date** compared to the null model, whereas the model including **sex** is no longer better than the null.
+
+- However, the only substantial effect is that of **firmware version** (difference between 1st and 3rd version).
+
+- Two further **influential cases** are detected based on the Cook's distance: A007 (for sex), A030 (for BMI).
+
+<br>
+
+#### Excluding also A007
+
+Next, the analysis is replicated by excluding also participant A007, which showed the highest influence on the estimated parameter (especially for age and BMI). Thus, the resulting model is specified by excluding **five participants** (A040, A060, A070, A013 and A007). Note that A007 does not sow an extreme average agreement compared to the rest of the sample.
+
+```{r warning=FALSE, message=FALSE}
+cbind(EBEagr.wide[EBEagr.wide$subject=="A007",c("subject","agreement")],
+      MEAN_minus2SD=round(mean(EBEagr.wide$agreement)-2*sd(EBEagr.wide$agreement),2))
+
+# excluding A013
+EBEagr_noInfl <- EBEagr_noInfl[EBEagr_noInfl$subject!="A007",]
+EBEagr.wide_noInfl <- EBEagr.wide_noInfl[EBEagr.wide_noInfl$subject!="A007",]
+
+# sex
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.sex_noInfl <- glmer(agreement~sex+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.sex_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.sex_noInfl))[2] # null is still the best
+summary(EBEagr.sex_noInfl)$coefficients[,1:3]
+
+# age
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.age_noInfl <- glmer(agreement~age+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.age_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.age_noInfl))[2] # null is still the best
+summary(EBEagr.age_noInfl)$coefficients[,1:3]
+
+# BMI
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.BMI_noInfl <- glmer(agreement~BMI+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.BMI_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.BMI_noInfl))[2] # null is still the best
+
+# firmware
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.firmware_noInfl <- glmer(agreement~firmware+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.firmware_noInfl,"subject"),which="cook", 
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.firmware_noInfl))[2] # firmware is better than the null
+summary(EBEagr.firmware_noInfl)$coefficients[,1:3]
+
+# date
+EBEagr.null_noInfl <- glmer(agreement~(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+EBEagr.date_noInfl <- glmer(agreement~date+(1|subject),family=binomial(link="logit"),nAGQ=0,data=EBEagr_noInfl)
+plot(influence(EBEagr.date_noInfl,"subject"),which="cook",
+     cutoff=4/nlevels(EBEagr.wide$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+Weights(AIC(EBEagr.null_noInfl,EBEagr.date_noInfl))[2] # null is still the best
+```
+
+<br>
+
+*Comments:*
+
+- The exclusion of A007 leads to stronger evdidence for the models including **sex**, **age** and **firmware** compared to the null model, whereas the models including **BMI** and **date** are no longer better than the null.
+
+- However, **none** of the estimated parameter is significant.
+
+- Although further potentially **influential cases** are detected (A030 for age, A059 for BMI, A017 for firmware), their Cook's distance is always lower than .25, and results would be too altered by the removal of more than five participants from a sample of 27.
+
+<br>
+
+#### Conclusions of Influential analysis
+
+In summary, several influential cases have been detected for the models predicting EBE agreement, and their exclusion was sometimes associated to emerging or redued effects. Our analysis showed that:
+
+- If all participants are included, **none** of the specified model is better than the null.
+
+- If we exclude **A040** (cook's distance > .4 for several model), **none** of the specified model is better than the null.
+
+- If we exclude **also A060** (cook's distance > .5 for BMI), the model including **firmware version** shows a stonger evidence than the null, but the estimated parameter is not significant (z = 1.80)
+
+- If we exclude **also A070** (cook's distance > .6 for date), the models including **sex**, **firmware** and **date** show a stonger evidence than the null, although only **firmware** and **date** show a substantial effect (z > 2)
+
+- If we exclude **also A013** (cook's distane > .3 for age and BMI), the models including **age**, **BMI**, **firmware** and **date** show a stronger evidence than the null, although only **firmware** show a substantial effect (z > 2).
+
+- If we exclude **also 007** (cook's distance > .3 for sex), the models including **sex**, **age** and **firmware** show stronger evidence than the null, but **none** of the effect is substantial.
+
+<br>
+
+In conclusion, **firmware version** is the only predictor showing some effects when two influential cases are excluded. However, its effect is strongly influenced also by other participants and not consistent. Sex and date are even less consistent. Thus, we could avoid excluding paritipants and keep the (null) results obtained from the full sample (better generizability, higher power, easier to explain).
+
+```{r warning=FALSE, message=FALSE}
+EBEagr.mComp
+```
+
+<br>
+
+### SUMMARY OUTPUT TABLE
+
+Here, we combine the tables generated for each outcome variable to export the table to be included in the manuscript.
+
+```{r warning=FALSE, message=FALSE}
+(mComp <- rbind(TST.mComp,SE.mComp,SOL.mComp,WASO.mComp,Light.mComp,Deep.mComp,REM.mComp,EBEagr.mComp))
+write.csv(mComp,"mComp.csv",row.names=FALSE)
+```
+
+<br>
+
+## 5.2. Cardiac reactivity
+
+Here, we analyse the role of HR changes amplitude in sleep stage detection.
+```{r warning=FALSE,message=FALSE,out.width='60%'}
+library(mgsub); library(yarrr); library(Rmisc); library(lme4); library(fitdistrplus); library(MuMIn); library(ggplot2); library(gridExtra)
+```
+
+<br>
+
+### 5.2.1. HR by stage  {.tabset .tabset-fade .tabset-pills}
+
+As a first step, we evaluate how **Fitbit HR** distributions change over **wake and sleep epochs**. This is done graphically (visualizing all epochs and individual means) and statistically tested with linear models. The role of **sex** is also explored.
+
+#### CHOOSE SECTION:
+
+<br>
+
+---
+
+#### DATA PREPARATION
+
+First, we adjust sleep staging labels and we prepare the dataset to be used.
+```{r warning=FALSE,message=FALSE,out.width='60%'}
+# back to original stage labels
+ebe$PSG_stage <- as.factor(mgsub(as.character(ebe$PSG),pattern=c(10,2,3,5),
+                                 replacement=c("wake","light","deep","rem")))
+ebe$FB_stage <- as.factor(mgsub(as.character(ebe$Fitbit),pattern=c(10,2,3,5),
+                                 replacement=c("wake","light","deep","rem")))
+ebe <- plyr::join(demos[,c("subject","group","sex")],ebe,type="full") # adding group and sex
+
+# number of considered Fitbit_HR values per stage
+as.data.frame(t(data.frame(stage=c("wake","light","deep","REM"),
+                           validEpochs=c(nrow(ebe[ebe$PSG_stage=="wake"&!is.na(ebe$Fitbit_HR),]),
+                                         nrow(ebe[ebe$PSG_stage=="light"&!is.na(ebe$Fitbit_HR),]),
+                                         nrow(ebe[ebe$PSG_stage=="deep"&!is.na(ebe$Fitbit_HR),]),
+                                         nrow(ebe[ebe$PSG_stage=="rem"&!is.na(ebe$Fitbit_HR),])))))
+```
+
+#### PLOT ALL EPOCHS
+
+Here, we plot the Fitbit-derived HR over the 3 sleep stages and wake epochs, as scored by PSG.
+```{r warning=FALSE,message=FALSE,out.width='60%'}
+# Fitbit_HR by PSG stage
+pirateplot(formula = Fitbit_HR ~ PSG_stage,data=ebe[ebe$group=="CTRL",],
+           theme=0,pal="southpark",xlab="PSG-derived stage",ylab="Fitbit HR (bpm)",
+           main="Fitbit HR by PSG stage in healthy sleepers (all epochs)",
+           bean.f.o=.6,point.o=.3,inf.f.o=.7,inf.b.o=.8,avg.line.o=1,bar.f.o=.5,
+           inf.f.col="white",inf.b.col="black",avg.line.col="black",bar.f.col=gray(.8),
+           point.pch=21,point.bg="darkgray",point.cex=.5)
+```
+
+The same plot is generated by considering **Fitbit staging**.
+```{r warning=FALSE,message=FALSE,out.width='60%'}
+pirateplot(formula = Fitbit_HR ~ FB_stage,data=ebe[ebe$group=="CTRL",],
+           theme=0,pal="southpark",xlab="PSG-derived stage",ylab="Fitbit HR (bpm)",
+           main="Fitbit HR by Fitbit stage in healthy sleepers (all epochs)",
+           bean.f.o=.6,point.o=.3,inf.f.o=.7,inf.b.o=.8,avg.line.o=1,bar.f.o=.5,
+           inf.f.col="white",inf.b.col="black",avg.line.col="black",bar.f.col=gray(.8),
+           point.pch=21,point.bg="darkgray",point.cex=.5)
+```
+
+<br>
+
+Finally, differences between sexes are graphically inspected.
+```{r warning=FALSE,message=FALSE,out.width='60%'}
+pirateplot(formula = Fitbit_HR ~ sex,data=ebe[ebe$group=="CTRL",],
+           theme=0,pal="southpark",xlab="sex",ylab="Fitbit HR (bpm)",
+           main="Fitbit HR by sex in healthy sleepers (all epochs)",
+           bean.f.o=.6,point.o=.3,inf.f.o=.7,inf.b.o=.8,avg.line.o=1,bar.f.o=.5,
+           inf.f.col="white",inf.b.col="black",avg.line.col="black",bar.f.col=gray(.8),
+           point.pch=21,point.bg="darkgray",point.cex=.5)
+```
+
+<br>
+
+*Comments*:
+
+- For both PSG and Fitbit EBE classifications, **higher Fitbit HR** is observed **during wake epochs** compared to sleep epochs. Higher HR is also observed during REM compared to 'light' and 'deep' epochs, but confidence intervals should be interpreted with caution since here each epoch is considered as independent (see LMER for more appropriate analysis).
+
+- Higher HR is observed among females compared to males.
+
+<br>
+
+#### PLOT IND. MEANS
+
+<br>
+
+The same plots are generated by averaging HR measures by subject.
+```{r warning=FALSE,message=FALSE,out.width='60%'}
+# averaging Fitbit_HR by participant and stage
+HR_wide <- summarySE(ebe[ebe$group=="CTRL",],measurevar="Fitbit_HR",groupvars=c("subject","PSG_stage"),na.rm=TRUE)
+# Fitbit_HR by PSG stage
+pirateplot(formula = Fitbit_HR ~ PSG_stage,data=HR_wide,
+           theme=0,pal="southpark",xlab="PSG-derived stage",ylab="Fitbit HR (bpm)",
+           main="Fitbit HR by PSG stage in healthy sleepers (mean values)",
+           bean.f.o=.6,point.o=.3,inf.f.o=.7,inf.b.o=.8,avg.line.o=1,bar.f.o=.5,
+           inf.f.col="white",inf.b.col="black",avg.line.col="black",bar.f.col=gray(.8),
+           point.pch=21,point.bg="darkgray",point.cex=.5)
+# averaging HR by participant and stage
+HR_wide <- summarySE(ebe[ebe$group=="CTRL",],measurevar="Fitbit_HR",groupvars=c("subject","FB_stage"),na.rm=TRUE)
+# HR by PSG stage
+pirateplot(formula = Fitbit_HR ~ FB_stage,data=HR_wide,
+           theme=0,pal="southpark",xlab="PSG-derived stage",ylab="Fitbit HR (bpm)",
+           main="Fitbit HR by Fitbit stage in healthy sleepers (mean values)",
+           bean.f.o=.6,point.o=.3,inf.f.o=.7,inf.b.o=.8,avg.line.o=1,bar.f.o=.5,
+           inf.f.col="white",inf.b.col="black",avg.line.col="black",bar.f.col=gray(.8),
+           point.pch=21,point.bg="darkgray",point.cex=.5)
+# averaging Fitbit_HR by participant and stage
+HR_wide <- summarySE(ebe[ebe$group=="CTRL",],measurevar="Fitbit_HR",groupvars=c("subject","sex"),na.rm=TRUE)
+# HR by PSG stage
+pirateplot(formula = Fitbit_HR ~ sex,data=HR_wide,
+           theme=0,pal="southpark",xlab="sex",ylab="Fitbit HR (bpm)",
+           main="Fitbit HR by sex in healthy sleepers (mean values)",
+           bean.f.o=.6,point.o=.3,inf.f.o=.7,inf.b.o=.8,avg.line.o=1,bar.f.o=.5,
+           inf.f.col="white",inf.b.col="black",avg.line.col="black",bar.f.col=gray(.8),
+           point.pch=21,point.bg="darkgray",point.cex=.5)
+
+```
+
+<br>
+
+*Comments*:
+
+- Also by averaging HR values by participant, both PSG and Fitbit EBE classification show **higher HR during wake** than during sleep epochs, with **no differences between sleep epochs**.
+
+- Higher HR is observed among females compared to males.
+
+<br>
+
+#### LMER
+
+Here, linear mixed-effects regression (LMER) models are used to test Fitbit HR differences between PSG sleep stages. A first model including only PSG sleep stages is compared with a null model and a second model including also sex.
+```{r }
+# recoding
+ebe$PSG_stage <- factor(ebe$PSG_stage,levels=c("wake","light","deep","rem"))
+ebe$sex <- factor(ebe$sex,levels=c("F","M"))
+ebeHS <- ebe[ebe$group=="CTRL",] # healthy sleepers only
+
+# modeling
+HRstage.null <- lmer(Fitbit_HR~(1|subject),data=ebeHS) # null model
+HRstage.PSGstage <- lmer(Fitbit_HR~PSG_stage+(1|subject),data=ebeHS) # PSGstage
+HRstage.sex <- lmer(Fitbit_HR~PSG_stage+sex+(1|subject),data=ebeHS) # sex
+  
+# mixed-effects regression assumptions
+plot(fitdist(resid(HRstage.sex),distr="norm",method="mle")) # 1. residuals slightly deviate from norm.
+gridExtra::grid.arrange(plot(HRstage.PSGstage), # 2. linearity
+                        lattice::dotplot(ranef(HRstage.PSGstage))[[1]], # 3. random effects centered to zero,
+                        plot(ranef(HRstage.PSGstage), # but slightly deviate from normality
+                             main="Random Effects QQplot")[[1]],nrow=2)
+plot(influence(HRstage.sex, "subject"),which="cook", # influential cases (cook's distance)
+     cutoff=4/nlevels(as.factor(as.character(ebe[ebe$group=="CTRL","subject"]))),
+     xlab="Cook distance",ylab="subject",sort=TRUE)
+
+# model comparison (AIC) - model with PSGstage is better than the null 
+cbind(AIC(HRstage.null,HRstage.PSGstage,HRstage.sex),
+      AICw=Weights(AIC(HRstage.null,HRstage.PSGstage,HRstage.sex))) 
+anova(HRstage.null,HRstage.PSGstage,HRstage.sex) # likelihood ratio test (signif.)
+
+# parameters estimation
+summary(HRstage.sex)$coefficients[,1:3]
+plot(effects::allEffects(HRstage.sex))
+```
+
+<br>
+
+*Comments:*
+
+- The regression model predicting Fitbit HR by both **PSG stage and sex** show **stronger evidence** (lower AIC, higher AICw) then the null model, and the likelihood ratio test is **significant** for both predictors.
+
+- The estimated parameter and their graphical inspection (pink lines are 95% CI) suggest a significantly higher Fitbit HR during wake epochs compared to sleep epochs, and among females than among males. No significant differences are observed between sleep stages.
+
+- Model diagnostics suggest a slight deviation from normality for the residuals, but it is not that bad. **One influential case** is detected based on the Cook's distance (A046 and A034).
+
+<br>
+
+**Excluding A034**
+
+To ascertain that these results are not due to the **influential case**, the analysis is replicated by excluding this participant.
+
+```{r }
+# excluding influential cases
+ebe_noInfl <- ebeHS[ebeHS$subject!="A034",]
+
+# modeling
+HRstage.null_noInfl <- lmer(Fitbit_HR~(1|subject),data=ebe_noInfl) # null model
+HRstage.PSGstage_noInfl <- lmer(Fitbit_HR~PSG_stage+(1|subject),data=ebe_noInfl) # PSGstage
+HRstage.sex_noInfl <- lmer(Fitbit_HR~PSG_stage+sex+(1|subject),data=ebe_noInfl)
+  
+# mixed-effects regression assumptions
+plot(fitdist(resid(HRstage.PSGstage_noInfl),distr="norm",method="mle")) # 1. residuals slightly deviate from norm.
+gridExtra::grid.arrange(plot(HRstage.PSGstage_noInfl), # 2. linearity
+                        lattice::dotplot(ranef(HRstage.PSGstage_noInfl))[[1]], # 3. random effects centered to zero,
+                        plot(ranef(HRstage.PSGstage_noInfl), # but slightly deviate from normality
+                             main="Random Effects QQplot")[[1]],nrow=2)
+plot(influence(HRstage.PSGstage_noInfl, "subject"),which="cook", # influential cases (cook's distance)
+     cutoff=4/nlevels(ebe$subject),xlab="Cook distance",ylab="subject",sort=TRUE)
+
+# model comparison (AIC) - model with PSGstage is better than the null 
+cbind(AIC(HRstage.null_noInfl,HRstage.PSGstage_noInfl,HRstage.sex_noInfl),
+      AICw=Weights(AIC(HRstage.null_noInfl,HRstage.PSGstage_noInfl,HRstage.sex_noInfl))) 
+anova(HRstage.null_noInfl,HRstage.PSGstage_noInfl,HRstage.sex_noInfl) # likelihood ratio test (signif.)
+
+# parameters estimation
+summary(HRstage.sex_noInfl)$coefficients[,1:3]
+plot(effects::allEffects(HRstage.sex_noInfl))
+```
+
+<br>
+
+*Comments:*
+
+- The exclusion of the infuential case **does not substantially change the results**. However, we decide to report the coefficients estimated without this participant to have more reliable estimates.
+
+<br>
+
+### 5.2.2. HRchange to transitions  {.tabset .tabset-fade .tabset-pills}
+
+Here, we evaluate if **EBE transition agreement** is predicted by **absolute FC3 HR changes** to PSG sleep EBE transitions. Moreover, the **type of transition** (i.e., between PSG epochs classified with the same stage or with different stages) and its **interaction** with FC3 HR changes are included as further predictors.
+
+#### CHOOSE SECTION:
+
+<br>
+
+---
+
+#### DATASET PREPARATION
+
+First, we generate a dataset reporting the **absolute percent change in Fitbit HR** for any **PSG EBE transition**.
+For each transition between two consecutive epochs, we also report if the individual epochs are equally scored by PSG and Fitbit (**EBE agreement** = 1) or not (EBE agreement = 0), and if the overall transition is equally scored (**EBE transition agreement** = 1) or not (EBE transition agreement = 0) by the two methods. EBE transition agreement is considered as 'correct' only when both epochs are equally classified by PSG and Fitbit.
+```{r }
+ebe$EBEagr <- ebe$TRANSagr <- ebe$HRchange <- 0 # empty rows to be filled
+ebe$stageTrans <- NA
+for(i in 1:nrow(ebe)){
+  if(i>1){ ebe[i,"HRchange"] = abs(100*(ebe[i,"Fitbit_HR"] - ebe[i-1,"Fitbit_HR"])/ebe[i-1,"Fitbit_HR"]) # HRchange
+  ebe[i,"PSG_stageTrans"] = paste(ebe[i-1,"PSG_stage"],ebe[i,"PSG_stage"],sep="-")
+  ebe[i,"FB_stageTrans"] = paste(ebe[i-1,"FB_stage"],ebe[i,"FB_stage"],sep="-")} # type of transition
+  
+  if(ebe[i,"PSG_stage"] == ebe[i,"FB_stage"]){ ebe[i,"EBEagr"] = 1 # EBEagr
+    if(i>1){ if(ebe[i-1,"PSG_stage"] == ebe[i-1,"FB_stage"]){ ebe[i,"TRANSagr"] = 1 }}}} # TRANSagr
+HRchange <- ebe[2:nrow(ebe),c("subject","group","sex","PSG_stage","FB_stage","EBEagr",
+                              "PSG_stageTrans","FB_stageTrans","TRANSagr","Fitbit_HR","HRchange")]
+head(HRchange[,c(1,4:11)],3) # showing first 3 rows
+```
+
+<br>
+
+Here, we can see the percentage of transitions for each type, in the sample of healthy sleepers.
+```{r }
+# descriptives
+HRchange <- HRchange[HRchange$group=="CTRL",] # including only healthy sleepers
+nCTRL <- nrow(HRchange)
+summary(as.factor(HRchange$PSG_stageTrans)) # number of epochs by EBE transition
+round(100*summary(as.factor(HRchange$PSG_stageTrans))/nrow(HRchange),2) # percentage of epochs by EBE transition
+100*nrow(HRchange[HRchange$PSG_stageTrans=="wake-wake"|HRchange$PSG_stageTrans=="light-light"|
+                HRchange$PSG_stageTrans=="deep-deep"|HRchange$PSG_stageTrans=="rem-rem",])/nrow(HRchange)
+accurate <- sameStage <- lightlight <- accurateSameStage <- accurateDifferentstages <- NA
+for(ID in levels(as.factor(as.character(HRchange$subject)))){
+  accurate <- c(accurate,100*nrow(HRchange[HRchange$subject==ID &
+                                             HRchange$TRANSagr==1,])/nrow(HRchange[HRchange$subject==ID,]))
+  same.stage <- HRchange[HRchange$subject==ID & (HRchange$PSG_stageTrans=="wake-wake"|
+                                                  HRchange$PSG_stageTrans=="light-light"|
+                                                  HRchange$PSG_stageTrans=="deep-deep"|
+                                                  HRchange$PSG_stageTrans=="rem-rem"),]
+  diff.stage <- HRchange[HRchange$subject==ID & HRchange$PSG_stageTrans!="wake-wake" &
+                           HRchange$PSG_stageTrans!="light-light" & HRchange$PSG_stageTrans!="deep-deep" &
+                           HRchange$PSG_stageTrans!="rem-rem",]
+  sameStage <- c(sameStage,100*nrow(same.stage)/nrow(HRchange[HRchange$subject==ID,]))
+  lightlight <- c(lightlight,100*nrow(HRchange[HRchange$subject==ID & HRchange$PSG_stageTrans=="light-light",])/
+                    nrow(HRchange[HRchange$subject==ID,]))
+  accurateSameStage <- c(accurateSameStage,100*nrow(same.stage[same.stage$TRANSagr==1,])/nrow(same.stage))
+  accurateDifferentstages <- c(accurateDifferentstages,100*nrow(diff.stage[diff.stage$TRANSagr==1,])/nrow(diff.stage))}
+mean(accurate,na.rm=TRUE); sd(accurate,na.rm=TRUE) # mean and SD of % transitions accurately classified
+mean(sameStage,na.rm=TRUE); sd(sameStage,na.rm=TRUE) # mean and SD of % transitions between same stage
+mean(lightlight,na.rm=TRUE); sd(lightlight,na.rm=TRUE) # mean and SD of % light-light transitions
+mean(accurateSameStage,na.rm=TRUE); sd(accurateSameStage,na.rm=TRUE) # mean and SD of % accurate between same stage
+mean(accurateDifferentstages,na.rm=TRUE); sd(accurateDifferentstages,na.rm=TRUE) # accurate between different stages
+```
+
+<br>
+
+Next, we exclude epochs with **missing HRchange value** (203 epochs, 0.84%, due to missing value in either epoch 1 or epoch 2 FC3 HR).
+```{r warning=FALSE}
+nrow(HRchange[is.na(HRchange$HRchange),]) # number of missing values
+100*nrow(HRchange[is.na(HRchange$HRchange),])/nrow(HRchange) # percentage of missing values
+HRchange <- HRchange[!is.na(HRchange$HRchange),]
+```
+
+<br>
+
+#### DESCRIPTIVES
+
+Here, absolute % HR changes are **averaged** by **participant**, **type of EBE transition**, and **transition agreement** (wide format). Note that some subjects have no (or only few) HRchange values for some combinations of transition type and agreement (supplemental material S2).
+```{r warning=FALSE}
+library(Rmisc)
+
+# averaging by subject, PSG transition and EBE transition agreement
+HRchange_wide <- summarySE(HRchange,"HRchange",c("subject","PSG_stageTrans","TRANSagr"),na.rm=TRUE)
+HRtable_wide <- summarySE(HRchange_wide,"HRchange",c("PSG_stageTrans","TRANSagr"),na.rm=TRUE)
+HRtable_long <- summarySE(HRchange,"HRchange",c("PSG_stageTrans","TRANSagr"),na.rm=TRUE)
+
+# summary table
+HRtable <- data.frame(stageTrans=levels(as.factor(HRtable_long$PSG_stageTrans)),
+                      nAcc=NA,nInacc=NA,HRchangeAcc=NA,HRchangeInacc=NA)
+for(i in 1:nrow(HRtable)){
+  tabLong <- HRtable_long[HRtable_long$PSG_stageTrans==HRtable[i,"stageTrans"],]
+  tabWide <- HRtable_wide[HRtable_wide$PSG_stageTrans==HRtable[i,"stageTrans"],]
+  nAcc <- ifelse(nrow(tabLong[tabLong$TRANSagr==1,])>0,tabLong[tabLong$TRANSagr==1,"N"],0)
+  nInacc <- ifelse(nrow(tabLong[tabLong$TRANSagr==0,])>0,tabLong[tabLong$TRANSagr==0,"N"],0)
+  HRtable[i,2:ncol(HRtable)] <- c(nAcc=nAcc,nInacc=nInacc,
+                                  HRchangeAcc=paste(round(tabWide[tabWide$TRANSagr==1,"HRchange"],2)," (",
+                                                    round(tabWide[tabWide$TRANSagr==1,"sd"],2),")",sep=""),
+                                  HRchangeInacc=paste(round(tabWide[tabWide$TRANSagr==0,"HRchange"],2)," (",
+                                                    round(tabWide[tabWide$TRANSagr==0,"sd"],2),")",sep="")) }
+(HRtable <- HRtable[c(15,6,1,10,13,8,5,2,7,9,4,11,14,12,3),])
+write.csv(HRtable,"S2_HRtable.csv",row.names=FALSE)
+```
+
+<br>
+
+#### PLOT ALL EPOCHS
+
+Here, we plot the **absolute percent HR change** by the **type of PSG EBE transition** and the agreement between PSG and Fitbit, considering all epochs including PSG EBE transitions.
+```{r warning=FALSE,message=FALSE,fig.width=12, fig.height=6}
+# HR change by PSG EBE transition
+HRchange$PSG_stageTrans <- factor(HRchange$PSG_stageTrans,levels=as.character(HRtable$stageTrans))
+summary(HRchange$PSG_stageTrans) # number of considered epochs by type of transition
+pirateplot(formula = HRchange ~ PSG_stageTrans,data=HRchange,avg.line.fun=median,
+           theme=0,pal="southpark",xlab="EBE transition",ylab="HR change (%)",
+           main="Abs.% HRchange by PSG transition in healthy sleepers \nconsidering all epochs (black line = median)",
+           bean.f.o=.6,point.o=.3,inf.f.o=0,inf.b.o=0,avg.line.o=1,bar.f.o=.5,
+           inf.f.col="white",inf.b.col="black",avg.line.col="black",bar.f.col=gray(.8),
+           point.pch=21,point.bg="darkgray",point.cex=.5,cex.names=.6)
+
+# HR change by EBE agreement
+HRchange$TRANSagr <- as.factor(HRchange$TRANSagr)
+summary(HRchange$TRANSagr) # number of considered epochs by EBE agreement
+pirateplot(formula = HRchange ~ TRANSagr,data=HRchange,avg.line.fun=median,
+           theme=0,pal="southpark",xlab="EBE transition agreement",ylab="HR change (%)",
+           main="Abs.% HRchange by EBE agreement in healthy sleepers \n considering all epochs (black line = median)",
+           bean.f.o=.6,point.o=.3,inf.f.o=0,inf.b.o=0,avg.line.o=1,bar.f.o=.5,
+           inf.f.col="white",inf.b.col="black",avg.line.col="black",bar.f.col=gray(.8),
+           point.pch=21,point.bg="darkgray",point.cex=.5,cex.names=.6)
+
+# HR change by PSG EBE transition & agreemet
+pirateplot(formula = HRchange ~ TRANSagr*PSG_stageTrans,data=HRchange,avg.line.fun=median,
+           theme=0,pal="southpark",xlab="EBE transition",ylab="HR change (%)",
+           main="AAbs.% HRchange by PSG transition and EBE transition agreement \nconsidering all epochs",
+           bean.f.o=.6,point.o=.3,inf.f.o=0,inf.b.o=0,avg.line.o=1,bar.f.o=.5,
+           inf.f.col="white",inf.b.col="black",avg.line.col="black",bar.f.col=gray(.8),
+           point.pch=21,point.bg="darkgray",point.cex=.5,cex.names=.6,cex.lab=.6)
+
+# HR change by sex
+pirateplot(formula = HRchange ~ sex,data=HRchange,avg.line.fun=median,
+           theme=0,pal="southpark",xlab="sex",ylab="HR change (%)",
+           main="Abs.% HRchange by sex in healthy sleepers \nconsidering all epochs (black line = median)",
+           bean.f.o=.6,point.o=.3,inf.f.o=0,inf.b.o=0,avg.line.o=1,bar.f.o=.5,
+           inf.f.col="white",inf.b.col="black",avg.line.col="black",bar.f.col=gray(.8),
+           point.pch=21,point.bg="darkgray",point.cex=.5,cex.names=.6)
+```
+
+<br>
+
+*Comments:*
+
+- Different types of EBE transitions are associated to different HR change amplitudes, with the highest amplitudes for **Wake-Light** and **Wake-Deep** transitions and the lowest amplitudes for **Light-Light**, **Deep-Deep**, **Light-Deep** and **Deep-REM** transitions.
+
+- No substantial differences are observed in terms of EBE agreement or sex on an epoch-by-epoch level.
+
+- The graphical representation of stageTrans x TRANSagr interaction shows that a number of contrasts are associated with **very few observations**, especially in the case of accurately classified *Light-Deep*, *Deep-Light*, *Light-REM* and *REM-Light* transitions, showing **less than 10 correctly classified** transitions.
+
+<br>
+
+#### PLOT IND. MEANS
+ 
+The same plots are generated by averaging HR changes by subject.
+```{r warning=FALSE,message=FALSE,fig.width=12, fig.height=6}
+# averaging HR by participant and EBE transition
+HRchange.wide <- summarySE(HRchange,measurevar="HRchange",groupvars=c("subject","PSG_stageTrans"),na.rm=TRUE)
+pirateplot(formula = HRchange ~ PSG_stageTrans,data=HRchange.wide,
+           theme=0,pal="southpark",xlab="EBE transition type",ylab="Absolute HR change (%)",
+           main="Abs.% HRchange by PSG transition in healthy sleepers \nvalues averaged by participant",
+           bean.f.o=.6,point.o=.9,inf.f.o=.3,inf.b.o=.8,avg.line.o=1,bar.f.o=.5,
+           inf.f.col="white",inf.b.col="black",avg.line.col="black",bar.f.col=gray(.8),
+           point.pch=21,point.cex=1,cex.names=.6)
+
+# averaging HR by participant and agreement
+HRchange.wide <- summarySE(HRchange,measurevar="HRchange",groupvars=c("subject","TRANSagr"),na.rm=TRUE)
+pirateplot(formula = HRchange ~ TRANSagr,data=HRchange.wide,
+           theme=0,pal="southpark",xlab="EBE transition agreement",ylab="Absolute HR change (%)",
+           main="Abs.% HRchange by transition agreement in healthy sleepers \nvalues averaged by participant",
+           bean.f.o=.6,point.o=.9,inf.f.o=.3,inf.b.o=.8,avg.line.o=1,bar.f.o=.5,
+           inf.f.col="white",inf.b.col="black",avg.line.col="black",bar.f.col=gray(.8),
+           point.pch=21,point.cex=1,cex.names=.6)
+
+# HR change by PSG EBE transition and agreement
+HRchange.wide <- summarySE(HRchange,measurevar="HRchange",groupvars=c("subject","PSG_stageTrans","TRANSagr"),
+                           na.rm=TRUE)
+pirateplot(formula = HRchange ~ TRANSagr*PSG_stageTrans,data=HRchange.wide,
+           theme=0,pal="southpark",xlab="EBE transition",ylab="Absolute HR change (%)",
+           main="Abs.% HRchange by PSG transition and transition agreement \nvalues averaged by participant",
+           bean.f.o=.6,point.o=.9,inf.f.o=.3,inf.b.o=.8,avg.line.o=1,bar.f.o=.5,
+           inf.f.col="white",inf.b.col="black",avg.line.col="black",bar.f.col=gray(.8),
+           point.pch=21,point.cex=.6,cex.names=.6)
+
+# HR change by sex
+HRchange.wide <- summarySE(HRchange,measurevar="HRchange",groupvars=c("subject","sex"),na.rm=TRUE)
+pirateplot(formula = HRchange ~ sex,data=HRchange.wide,
+           theme=0,pal="southpark",xlab="sex",ylab="Absolute HR change (%)",
+           main="Abs.% HRchange by sex in healthy sleepers \nvalues averaged by participant",
+           bean.f.o=.6,point.o=.9,inf.f.o=.3,inf.b.o=.8,avg.line.o=1,bar.f.o=.5,
+           inf.f.col="white",inf.b.col="black",avg.line.col="black",bar.f.col=gray(.8),
+           point.pch=21,point.cex=1,cex.names=.6)
+```
+
+<br>
+
+*Comments:*
+
+- As shown by epoch-by-epoch data, average values show the **highest HR changes** for **Wake-Light** transitions, followed by **Light-Wake** and **Wake-Deep**, whereas the **lowest changes** are showed by **Light-Light**, **Deep-Deep** and **Light-Deep** transitions.
+
+- Considering all transition types, **higher** averaged HRchanges are showed by **incorrectly classified** compared to correctly classified transitions.
+
+- The visualization of the stageTrans x TRANSagr interaction shows **higher** averaged HR changes for **incorrectly** classified **Light-Light**, **Deep-Deep** transitions. In contrast, **higher** averaged HR changes are observed for **correctly** classified **REM-REM** and **Wake-Light** transitions. No differences are observed between correctly and incorrectly classified Wake-Wake, Wake-Light and Light-Wake transitions.
+
+- No differences are found between males and females (sex can be ignored in the models).
+
+<br>
+
+#### LMER
+
+Finally, logistic mixed-effects regression (LMER) models are used to test the **interaction** between **HRchange** and the **type of transition** in predicting the agreement between FC3 and PSG classifications, by considering all epochs (instead of averaged values). Since the previous steps showed very few **Light-Deep**, **Deep-Light**, **Light-REM** and **REM-Light** transitions, such transitions are not considered in the analysis.
+```{r out.width='80%',warning=FALSE}
+HRchange2 <- HRchange
+# type of transition
+HRchange2$TRANStype <- "different"
+HRchange2[HRchange2$PSG_stageTrans=="wake-wake"|HRchange2$PSG_stageTrans=="light-light"|
+            HRchange2$PSG_stageTrans=="deep-deep"|HRchange2$PSG_stageTrans=="rem-rem","TRANStype"] <- "equal"
+HRchange2$TRANStype <- factor(HRchange2$TRANStype,levels=c("equal","different"))
+summary(HRchange2$TRANStype) # 21,892 vs. 1,940 
+
+# plotting
+yarrr::pirateplot(HRchange~TRANSagr*TRANStype,data=HRchange2,
+                  avg.line.fun=median,inf.f.o=0,inf.b.o=0,bar.f.o=.5)
+
+# modeling
+TRANSagr.null <- glmer(TRANSagr~(1|subject),family=binomial(link="logit"),data=HRchange2)
+TRANSagr.HRchange <- glmer(TRANSagr~HRchange+(1|subject),family=binomial(link="logit"),
+                            data=HRchange2)
+TRANSagr.TRANStype.HRchange <- glmer(TRANSagr~TRANStype+HRchange+(1|subject),family=binomial(link="logit"),
+                                     data=HRchange2)
+TRANSagr.TRANStypexHRchange <- glmer(TRANSagr~TRANStype*HRchange+(1|subject),family=binomial(link="logit"),
+                                     data=HRchange2)
+
+# logistic regression assuptions
+HRchange2$probabilities <- predict(TRANSagr.TRANStypexHRchange, type = "response") # Predict prob. of agreement
+HRchange2$logit <- log(HRchange2$probabilities/(1-HRchange2$probabilities)) # from probability to logit
+             # 1. linear relationship between continuous predictor variables and the logit of the outcome
+grid.arrange(ggplot(HRchange2[HRchange2$TRANStype=="equal",],aes(HRchange,logit))+geom_point(size=2)+
+               geom_smooth(method="loess",span=2)+ggtitle("Linearity HRchange - equal trans. agr."),
+             ggplot(HRchange2[HRchange2$TRANStype=="different",],aes(HRchange,logit))+geom_point(size=2)+
+               geom_smooth(method="loess",span=2)+ggtitle("Linearity HRchange - different trans. agr."),
+             lattice::dotplot(ranef(TRANSagr.TRANStypexHRchange))[[1]], # 2. random eff. centered to 0
+             plot(ranef(TRANSagr.TRANStypexHRchange),main="Random Effects QQplot")[[1]], # and normally distributed
+             nrow=2) # influential cases (Cook's distance) - no evident influential cases
+plot(influence(TRANSagr.TRANStypexHRchange,"subject"),which="cook", 
+     cutoff=4/nlevels(as.factor(as.character(HRchange2$subject))),xlab="Cook's distance",ylab="subject",sort=TRUE)
+
+# model comparison (interaction is the best one, followed by additive model)
+A <- AIC(TRANSagr.null,TRANSagr.HRchange,TRANSagr.TRANStype.HRchange,TRANSagr.TRANStypexHRchange)
+A$AICw <- Weights(A$AIC); A$dAIC <- A$AIC - min(A$AIC); A # delta AIC
+anova(TRANSagr.null,TRANSagr.HRchange,TRANSagr.TRANStype.HRchange,TRANSagr.TRANStypexHRchange) # likel. ratio test
+
+# parameters estimation and effect plot
+summary(TRANSagr.TRANStypexHRchange)$coefficients[,1:3]
+plot(effects::allEffects(TRANSagr.TRANStypexHRchange))
+```
+
+<br>
+
+*Comments:*
+
+- Model comparison suggests the strongest evidence (higher AICw) for the **interactive model** compared to all other models, followed by the additive model. Results are confirmed by the likelihood ratio test.
+
+- The estimated parameters indicate a main effect of the type of transition, with lower EBE transition agreement in PSG transitions between different stages compared to transitions between the same stage. Higher HR changes predicted lower agreement in classifying transitions between PSG epochs classified with the same stage, whereas the opposite pattern was found for PSG transitions between different stages.
+
+- One **influential case** is detected based on the Cook's distance (*A051*).
+
+- Note also that the design is **highly unbalanced**. Although LMER is robust to unbalanceness, results should be interpreted with caution.
+
+<br>
+
+<br>
+
+**Excluding A051**
+
+To ascertain that these results are not due to the **influential case**, the analysis is replicated by excluding this participant.
+
+```{r warning=FALSE, message=FALSE}
+# excluding influential cases
+HRchange2_noInfl <- HRchange2[HRchange2$subject!="A051",]
+summary(HRchange2$TRANStype) # 21,892 vs. 1,940
+
+# plotting
+yarrr::pirateplot(HRchange~TRANSagr*TRANStype,data=HRchange2_noInfl,
+                  avg.line.fun=median,inf.f.o=0,inf.b.o=0,bar.f.o=.5)
+
+# modeling
+TRANSagr.null <- glmer(TRANSagr~(1|subject),family=binomial(link="logit"),data=HRchange2_noInfl)
+TRANSagr.HRchange <- glmer(TRANSagr~HRchange+(1|subject),family=binomial(link="logit"),
+                            data=HRchange2_noInfl)
+TRANSagr.TRANStype.HRchange <- glmer(TRANSagr~TRANStype+HRchange+(1|subject),family=binomial(link="logit"),
+                                     data=HRchange2_noInfl)
+TRANSagr.TRANStypexHRchange <- glmer(TRANSagr~TRANStype*HRchange+(1|subject),family=binomial(link="logit"),
+                                     data=HRchange2_noInfl)
+
+# logistic regression assuptions
+HRchange2_noInfl$probabilities <- predict(TRANSagr.TRANStypexHRchange, type = "response") # Predict prob. of agreement
+HRchange2_noInfl$logit <- log(HRchange2_noInfl$probabilities/(1-HRchange2_noInfl$probabilities)) # from probability to logit
+             # 1. linear relationship between continuous predictor variables and the logit of the outcome
+grid.arrange(ggplot(HRchange2_noInfl[HRchange2_noInfl$TRANStype=="equal",],aes(HRchange,logit))+geom_point(size=2)+
+               geom_smooth(method="loess",span=2)+ggtitle("Linearity HRchange - equal trans. agr."),
+             ggplot(HRchange2_noInfl[HRchange2_noInfl$TRANStype=="different",],aes(HRchange,logit))+geom_point(size=2)+
+               geom_smooth(method="loess",span=2)+ggtitle("Linearity HRchange - different trans. agr."),
+             lattice::dotplot(ranef(TRANSagr.TRANStypexHRchange))[[1]], # 2. random eff. centered to 0
+             plot(ranef(TRANSagr.TRANStypexHRchange),main="Random Effects QQplot")[[1]], # and normally distributed
+             nrow=2) # influential cases (Cook's distance) - no evident influential cases
+plot(influence(TRANSagr.TRANStypexHRchange,"subject"),which="cook", 
+     cutoff=4/nlevels(as.factor(as.character(HRchange2$subject))),xlab="Cook's distance",ylab="subject",sort=TRUE)
+
+# model comparison (interaction is the best one, followed by additive model)
+A <- AIC(TRANSagr.null,TRANSagr.HRchange,TRANSagr.TRANStype.HRchange,TRANSagr.TRANStypexHRchange)
+A$AICw <- Weights(A$AIC); A$dAIC <- A$AIC - min(A$AIC); A # delta AIC
+anova(TRANSagr.null,TRANSagr.HRchange,TRANSagr.TRANStype.HRchange,TRANSagr.TRANStypexHRchange) # likel. ratio test
+
+# parameters estimation and effect plot
+summary(TRANSagr.TRANStypexHRchange)$coefficients[,1:3]
+plot(effects::allEffects(TRANSagr.TRANStypexHRchange))
+```
+
+<br>
+
+*Comments:*
+
+- Results are almost unchanged following the exclusion of the influential case. We can present the results obtained from the full sample.
+
+<br>
+
+**Results visualization**
+
+<details><summary>Show code</summary>
+<p>
+```{r warning=FALSE,message=FALSE}
+library(effects); library(sjPlot); windowsFonts(CMU=windowsFont("CMU Serif Roman")); library(gridExtra); library(ggplot2); library(lme4)
+
+# 1) FC3 HR by PSG stage classification
+HR_wide <- summarySE(ebe[ebe$group=="CTRL",],measurevar="Fitbit_HR",groupvars=c("subject","PSG_stage"),na.rm=TRUE)
+HR_wide$PSG_stage <- gsub("wake","Wake",HR_wide$PSG_stage)
+HR_wide$PSG_stage <- gsub("light","'Light'",HR_wide$PSG_stage)
+HR_wide$PSG_stage <- gsub("rem","REM",HR_wide$PSG_stage)
+HR_wide$PSG_stage <- gsub("deep","'Deep'",HR_wide$PSG_stage)
+HR_wide$PSG_stage <- factor(HR_wide$PSG_stage,levels=c("Wake","'Light'","'Deep'","REM"))
+ef <- as.data.frame(effect("PSG_stage",HRstage.sex)) # confidence intervals from LMER model
+ef$PSG_stage <- levels(HR_wide$PSG_stage)
+colnames(ef)[2] <- "Fitbit_HR"
+p1 <- ggplot(HR_wide,aes(PSG_stage,Fitbit_HR,fill=PSG_stage)) + 
+  geom_point(col="gray",position = position_jitter(width = .15))+geom_violin(alpha=.4) + 
+  geom_point(data=ef,size=2) + theme_bw()+ geom_errorbar(data=ef,aes(ymin=lower,ymax=upper),width=.4)+
+  xlab("PSG-derived sleep stage")+ylab("FC3 HR (bpm)")+ ggtitle("a") +
+  theme(text=element_text(family="CMU"),legend.position="none")
+
+# 2) Transition agreement by HRchange and TRANStype
+HRchange2$TRANStype <- gsub("equal","Same stage",HRchange2$TRANStype)
+HRchange2$TRANStype <- gsub("different","Different stages",HRchange2$TRANStype)
+HRchange2$TRANStype <- factor(HRchange2$TRANStype,levels=c("Same stage","Different stages"))
+TRANSagr.TRANStypexHRchange <- glmer(TRANSagr~TRANStype*HRchange+(1|subject),family=binomial(link="logit"),
+                                     data=HRchange2[HRchange2$HRchange<40,]) # bound at 40 for better visualization
+# interaction plot TRANSagr
+p2 <- plot_model(TRANSagr.TRANStypexHRchange, type="pred",terms=c("HRchange [all]","TRANStype"),
+           legend.title="Type of PSG EBE transition") + 
+  ggtitle("b")+xlab("Absolute FC3 HR change to PSG EBE transitions (%)")+
+  ylab("Probability of EBE transition agreement")+theme_bw()+
+  # ylim(10,80)+
+  theme(legend.position=c(.3,.45),text=element_text(family="CMU"),
+        legend.background = element_rect(fill="transparent"))
+```
+</p>
+</details>
+
+```{r fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+p <- grid.arrange(p1,p2,nrow=1)
+# ggsave("Figure2_HRstage.tiff",plot=p,dpi=300) # saving plot
+```
+
+<br>
+
+<br>
+
+# References
+
+Menghini, L., Cellini, N., Goldstone, A., Baker, F. C., & de Zambotti, M. A standardized framework for testing the performance of sleep-tracking technology: Step-by-step guidelines and open-source code. *Sleep* (In press) doi.org/10.1093/sleep/zsaa170   
+
+<br>
+
+## Required R packages
+
+<br>
+
+Attali, D., & Baker, C. (2019). ggExtra: Add Marginal Histograms to 'ggplot2', and More 'ggplot2' Enhancements. R package version 0.9. <br> https://cran.r-project.org/web/packages/ggExtra
+
+Barton, K. (2018). MuMIn: Multi-Model Inference. R package version 1.42.1. https://CRAN.R-project.org/packages/MuMIn
+
+Bates, D., Maechler, M., Bolker, B., & Walker, S. (2015). Fitting Linear Mixed-Effects Models Using lme4. *Journal of Statistical Software*, 67(1), 1-48. https://cran.r-project.org/web/packages/lme4 
+
+Canty, A., & Ripley, B. (2019). boot: Bootstrap R (S-Plus) Functions. R package version 1.3-23. https://cran.r-project.org/web/packages/boot
+
+Ewing, M. (2018). mgsub: Safe, Multiple, Simultaneous String Substitution. R package version 1.5.0. https://CRAN.R-project.org/package=mgsub
+
+Fox, J. (2003). Effect Displays in R for Generalised Linear Models. *Journal of Statistical Software*, 8(15), 1-27. https://cran.r-project.org/web/packages/effects
+
+Fox J., & Weisberg, S. (2011). *An R Companion to Applied Regression, Second Edition*. Thousand Oaks CA: Sage. R package car R version 3.0.2. https://cran.r-project.org/web/packages/car
+
+Harrell, F., E., Dupont C., et al. (2019). Hmisc: Harrell Miscellaneous. R package version 4.2-0. https://CRAN.R-project.org/package=Hmisc
+
+Kassambara, A. (2019). ggpubr: 'ggplot2' Based Publication Ready Plots. R package version 0.2.3. https://CRAN.R-project.org/package=ggpubr
+
+Kohl M (2020). MKinfer: Inferential Statistics. R package version 0.5, https://cran.r-project.org/web/packages/MKinfer
+
+Lehnert, B. (2015). BlandAltmanLeh: Plots (Slightly Extended) Bland-Altman Plots. R package version 0.3.1. <br> https://cran.r-project.org/web/packages/BlandAltmanLeh
+
+Phillips, N. (2017). yarrr: A Companion to the e-Book "YaRrr!: The Pirate's Guide to R". R
+  package version 0.1.5. https://cran.r-project.org/web/packages/yarrr
+
+Signorell, A. et al. (2020). DescTools: Tools for descriptive statistics. R package version 0.99.32. <br> https://cran.r-project.org/web/packages/DescTools
+
+Sing T., Sander O, Beerenwinkel, N., & Lengauer, T. (2005). ROCR: visualizing classifier performance in R. *Bioinformatics, 21*(20), 3940-3941. <br> https://cran.r-project.org/web/packages/ROCR
+
+Stevenson, M., Nunes, T., Heuer, C., ..., & Reynard, C. (2019). epiR: Tools for the Analysis of Epidemiological Data. R package version 1.0-10. <br> https://cran.r-project.org/web/packages/epiR
+
+Wickham, H. (2007). Reshaping Data with the reshape Package. *Journal of Statistical Software, 21*(12), 1-20. <br> https://cran.r-project.org/web/packages/reshape2
+
+Wickham, H. (2016). *ggplot2: Elegant Graphics for Data Analysis*. New York: Springer-Verlag. R package version 3.2.1. <br> https://cran.r-project.org/web/packages/ggplot2/index.html
+
+<br>
